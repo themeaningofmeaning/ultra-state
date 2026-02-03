@@ -93,14 +93,14 @@ garmin-fit-analyzer/
 ├── src/
 │   └── garmin_analyzer/
 │       ├── __init__.py
-│       ├── __main__.py
-│       ├── analyzer.py      # Core analysis engine
-│       ├── cli.py           # Command-line interface
-│       └── gui.py           # Tkinter GUI
-├── pyproject.toml           # Package configuration
-├── requirements.txt         # Dependencies
-├── build_mac.sh             # macOS build script
+│       ├── analyzer.py      # Core analysis logic
+│       └── gui.py           # GUI & Matplotlib charts
+├── assets/                  # README screenshots
+├── build_mac.sh             # Mac build script
 ├── build_windows.bat        # Windows build script
+├── runner.icns              # Mac App Icon
+├── runner.ico               # Windows App Icon
+├── requirements.txt         # Dependencies
 └── README.md
 ```
 
@@ -136,3 +136,6 @@ MIT License - see LICENSE file for details.
 
 - Based on the Minetti (2002) energy cost equation for grade adjustments
 - Inspired by Strava's GAP methodology
+
+---
+*Built with love for 🏃‍♂️ and 🍵 by Dylan Goldfus*
