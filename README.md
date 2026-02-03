@@ -1,11 +1,11 @@
-# Garmin FIT Analyzer
+# Garmin FIT Analyzer 🏃‍♂️💨
 
 A cross-platform desktop application for analyzing Garmin running fit files. Features a graphical interface for selecting folders and processing multiple files at once.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 
-## Features
+## ✨ Features
 
 - 📁 **Folder Selection** - Pick any folder containing `.fit` files
 - 🏃 **Running Metrics**:
@@ -19,7 +19,15 @@ A cross-platform desktop application for analyzing Garmin running fit files. Fea
 - 🔄 **Cross-Platform** - Works on Windows and macOS
 - 📦 **Standalone Executables** - No Python installation required for end users
 
-## Installation
+## 📸 Screenshots
+
+### The Dashboard
+![Dashboard View](assets/dashboard.png)
+
+### Trend Analysis (Matplotlib Integration)
+![Graph View](assets/graph.png)
+
+## 🚀 Installation
 
 ### Option 1: Run from Source (Requires Python)
 
