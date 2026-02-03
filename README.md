@@ -142,11 +142,12 @@ garmin-fit-analyzer/
 └── README.md
 ```
 
-## Dependencies
+## 🛠️ Built With
 
-- `fitparse` - FIT file parsing
-- `pandas` - Data manipulation
-- `numpy` - Numerical computations
+* **[CustomTkinter](https://github.com/TomSchimansky/CustomTkinter)** - Modern, dark-mode UI library.
+* **[Matplotlib](https://matplotlib.org/)** - Graphing and data visualization.
+* **[FitParse](https://github.com/dtcooper/python-fitparse)** - Low-level FIT file parsing.
+* **[Pandas](https://pandas.pydata.org/)** & **[NumPy](https://numpy.org/)** - Data manipulation and vector math.
 
 ## License
 
