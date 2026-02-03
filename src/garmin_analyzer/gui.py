@@ -1,350 +1,265 @@
 """
-Garmin FIT File Analyzer - GUI Interface
-Cross-platform desktop app using tkinter (built into Python)
+Garmin FIT File Analyzer - v2.1 (Stable)
+Features: Matplotlib Trends, Fixed Info Modal, Tabbed Interface.
 """
 
-import tkinter as tk
-from tkinter import filedialog, scrolledtext, messagebox
+import customtkinter as ctk
+from tkinter import filedialog
 import threading
-from datetime import datetime
-from typing import Optional, List, Dict, Any
 import sys
 import os
 import csv
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 
-# Add src directory to path for imports
+# --- GRAPHING IMPORTS (Crucial for the graph to work) ---
+import matplotlib
+matplotlib.use("TkAgg") # Force TkAgg backend for cross-platform stability
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.dates as mdates
+
+# Ensure imports work for both dev and compiled app
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from garmin_analyzer.analyzer import FitAnalyzer
 
+# Enforce Dark Theme
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
 
-class GarminAnalyzerGUI:
-    """Main GUI application for Garmin FIT file analysis."""
-    
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.root.title("Garmin FIT Analyzer")
-        self.root.geometry("750x650")
-        self.root.minsize(650, 450)
+class InfoModal(ctk.CTkToplevel):
+    """Modern 'How-To' Modal Dialog."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("How to Use")
+        self.geometry("420x380") # Slightly taller/wider for safety
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
         
-        # Store results for CSV export
+        # Center title
+        lbl = ctk.CTkLabel(
+            self, 
+            text="Quick Start Guide", 
+            font=ctk.CTkFont(size=20, weight="bold")
+        )
+        lbl.pack(pady=(25, 15))
+        
+        # Steps with wraplength to prevent cutoff
+        steps = (
+            "1. Log in to Garmin Connect on your web browser.\n\n"
+            "2. Download your activities as 'Original' (.FIT) files.\n\n"
+            "3. Move those .fit files into a single folder on your computer.\n\n"
+            "4. Click 'Select Folder' here to analyze them!"
+        )
+        
+        step_lbl = ctk.CTkLabel(
+            self, 
+            text=steps, 
+            justify="left", 
+            font=ctk.CTkFont(size=14), 
+            text_color="#E0E0E0",
+            wraplength=350 # Fixes the text cutoff issue
+        )
+        step_lbl.pack(pady=10, padx=30)
+        
+        # Close Button
+        btn = ctk.CTkButton(
+            self, 
+            text="Got it!", 
+            width=120,
+            height=35,
+            fg_color="#2FA572",
+            hover_color="#25855A", 
+            command=self.destroy
+        )
+        btn.pack(pady=25)
+
+class GarminAnalyzerGUI(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Garmin FIT Analyzer")
+        self.geometry("1100x800")
+        
+        # Layout: Sidebar + Main
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        
         self.analysis_results: List[Dict[str, Any]] = []
         self.last_folder_path: Optional[str] = None
         
-        # Make it look decent on both platforms
-        self._setup_styles()
         self._create_widgets()
-        
-    def _setup_styles(self):
-        """Configure GUI styles."""
-        self.bg_color = "#f5f5f5"
-        self.root.configure(bg=self.bg_color)
-        
+
     def _create_widgets(self):
-        """Create all GUI widgets."""
+        # --- SIDEBAR ---
+        self.sidebar = ctk.CTkFrame(self, width=240, corner_radius=0)
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.grid_rowconfigure(4, weight=1)
+        
+        self.logo = ctk.CTkLabel(self.sidebar, text="RUN ANALYZER", font=ctk.CTkFont(size=24, weight="bold"))
+        self.logo.grid(row=0, column=0, padx=20, pady=(50, 40))
+        
+        self.btn_select = ctk.CTkButton(
+            self.sidebar, text="📂  Select Folder", height=45, 
+            font=ctk.CTkFont(size=15, weight="bold"), command=self.select_folder
+        )
+        self.btn_select.grid(row=1, column=0, padx=30, pady=10)
+        
+        # Info Button
+        self.btn_info = ctk.CTkButton(
+            self.sidebar, text="ⓘ  How it works", height=30,
+            fg_color="transparent", border_width=1, text_color="gray70",
+            command=self.open_info
+        )
+        self.btn_info.grid(row=2, column=0, padx=30, pady=10)
+
+        # Version
+        self.lbl_ver = ctk.CTkLabel(self.sidebar, text="v2.1", text_color="gray40")
+        self.lbl_ver.grid(row=5, column=0, padx=20, pady=20, sticky="s")
+
+        # --- MAIN AREA (Tabs) ---
+        self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        self.main_frame.grid_rowconfigure(1, weight=1)
+        self.main_frame.grid_columnconfigure(0, weight=1)
         
         # Header
-        header_frame = tk.Frame(self.root, bg=self.bg_color, pady=10)
-        header_frame.pack(fill=tk.X, padx=20)
+        self.header = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self.lbl_status = ctk.CTkLabel(self.header, text="Dashboard", font=ctk.CTkFont(size=24, weight="bold"))
+        self.lbl_status.pack(side="left")
+
+        # Tabs: Report vs Visuals
+        self.tabs = ctk.CTkTabview(self.main_frame)
+        self.tabs.grid(row=1, column=0, sticky="nsew")
+        self.tab_report = self.tabs.add("📝 Text Report")
+        self.tab_visuals = self.tabs.add("📈 Trend Graph")
         
-        title_label = tk.Label(
-            header_frame,
-            text="🏃 Garmin FIT File Analyzer",
-            font=("Arial", 18, "bold"),
-            bg=self.bg_color,
-            fg="#333"
+        # Tab 1: Text Output
+        self.tab_report.grid_columnconfigure(0, weight=1)
+        self.tab_report.grid_rowconfigure(0, weight=1)
+        self.txt_output = ctk.CTkTextbox(self.tab_report, font=("Consolas", 14), fg_color="#181818")
+        self.txt_output.grid(row=0, column=0, sticky="nsew")
+        self._emit("👋 Welcome!\n\nClick 'Select Folder' to analyze your runs.\nClick 'How it works' if you are new here.")
+
+        # Tab 2: Visuals (Empty initially)
+        self.tab_visuals.grid_columnconfigure(0, weight=1)
+        self.tab_visuals.grid_rowconfigure(0, weight=1)
+        self.lbl_no_data = ctk.CTkLabel(self.tab_visuals, text="No data loaded yet.", text_color="gray")
+        self.lbl_no_data.grid(row=0, column=0)
+        self.canvas = None
+
+        # --- ACTION BAR ---
+        self.actions = ctk.CTkFrame(self.main_frame, fg_color="transparent", height=50)
+        self.actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        
+        self.btn_copy = ctk.CTkButton(
+            self.actions, text="📋 Copy for LLM", width=160, height=35,
+            fg_color="#2FA572", font=ctk.CTkFont(weight="bold"), command=self.copy_all
         )
-        title_label.pack()
-        
-        subtitle_label = tk.Label(
-            header_frame,
-            text="Select a folder containing .fit files to analyze",
-            font=("Arial", 10),
-            bg=self.bg_color,
-            fg="#666"
-        )
-        subtitle_label.pack()
-        
-        # Options frame
-        options_frame = tk.Frame(self.root, bg=self.bg_color, pady=5)
-        options_frame.pack(fill=tk.X, padx=20)
-        
-        # CSV Export checkbox
-        self.export_csv_var = tk.BooleanVar(value=False)
-        self.export_csv_cb = tk.Checkbutton(
-            options_frame,
-            text="📊 Export CSV (for spreadsheets/Excel)",
-            variable=self.export_csv_var,
-            font=("Arial", 10),
-            bg=self.bg_color,
-            fg="#333",
-            activebackground=self.bg_color
-        )
-        self.export_csv_cb.pack(anchor=tk.W)
-        
-        # Button frame
-        button_frame = tk.Frame(self.root, bg=self.bg_color, pady=10)
-        button_frame.pack(fill=tk.X, padx=20)
-        
-        self.select_btn = tk.Button(
-            button_frame,
-            text="📁 Select Folder",
-            command=self.select_folder,
-            font=("Arial", 12, "bold"),
-            bg="#4CAF50",
-            fg="white",
-            padx=20,
-            pady=8,
-            relief=tk.FLAT,
-            bd=0
-        )
-        self.select_btn.pack(side=tk.LEFT)
-        
-        # Export CSV button (disabled by default)
-        self.export_btn = tk.Button(
-            button_frame,
-            text="💾 Save CSV",
-            command=self.export_csv,
-            font=("Arial", 10),
-            bg="#2196F3",
-            fg="white",
-            padx=15,
-            pady=8,
-            relief=tk.FLAT,
-            bd=0,
-            state=tk.DISABLED
-        )
-        self.export_btn.pack(side=tk.LEFT, padx=10)
-        
-        # Clear button
-        clear_btn = tk.Button(
-            button_frame,
-            text="🗑️ Clear",
-            command=self.clear_output,
-            font=("Arial", 10),
-            bg="#e0e0e0",
-            fg="#333",
-            padx=15,
-            pady=8,
-            relief=tk.FLAT,
-            bd=0
-        )
-        clear_btn.pack(side=tk.RIGHT)
-        
-        # Copy All button
-        copy_btn = tk.Button(
-            button_frame,
-            text="📋 Copy All",
-            command=self.copy_all,
-            font=("Arial", 10),
-            bg="#e0e0e0",
-            fg="#333",
-            padx=15,
-            pady=8,
-            relief=tk.FLAT,
-            bd=0
-        )
-        copy_btn.pack(side=tk.RIGHT, padx=5)
-        
-        # Progress label
-        self.status_label = tk.Label(
-            self.root,
-            text="Ready - Select a folder to begin",
-            font=("Arial", 10),
-            bg=self.bg_color,
-            fg="#666"
-        )
-        self.status_label.pack(fill=tk.X, padx=20)
-        
-        # Output area
-        output_frame = tk.Frame(self.root, bg=self.bg_color, padx=20, pady=10)
-        output_frame.pack(fill=tk.BOTH, expand=True)
-        
-        self.output_text = scrolledtext.ScrolledText(
-            output_frame,
-            font=("Consolas", 10),
-            bg="white",
-            fg="#333",
-            wrap=tk.WORD,
-            padx=10,
-            pady=10,
-            relief=tk.FLAT,
-            bd=1
-        )
-        self.output_text.pack(fill=tk.BOTH, expand=True)
-        
-        # Footer
-        footer_frame = tk.Frame(self.root, bg="#e0e0e0", pady=5)
-        footer_frame.pack(fill=tk.X, side=tk.BOTTOM)
-        
-        footer_label = tk.Label(
-            footer_frame,
-            text="Analyzes: GAP, HR decoupling, form, cadence, power • Copy text directly to Claude/GPT/Gemini",
-            font=("Arial", 9),
-            bg="#e0e0e0",
-            fg="#666"
-        )
-        footer_label.pack()
-    
+        self.btn_copy.pack(side="right")
+
+    # --- LOGIC ---
+    def open_info(self):
+        InfoModal(self)
+
     def select_folder(self):
-        """Open folder selection dialog."""
-        folder_selected = filedialog.askdirectory(
-            title="Select Folder with FIT Files",
-            mustexist=True
-        )
-        
-        if folder_selected:
-            self.clear_output()
-            self.last_folder_path = folder_selected
-            self._emit(f"📂 Selected: {folder_selected}\n")
-            self.status_label.config(text="Analyzing...", fg="#2196F3")
-            self.select_btn.config(state=tk.DISABLED)
+        folder = filedialog.askdirectory(mustexist=True)
+        if folder:
+            self.txt_output.delete("1.0", "end")
+            self._emit(f"📂 Analyzing: {folder}...\n")
+            self.lbl_status.configure(text="Analyzing...")
+            self.btn_select.configure(state="disabled")
             
-            # Run analysis in separate thread to keep GUI responsive
-            thread = threading.Thread(
-                target=self._run_analysis,
-                args=(folder_selected,)
-            )
+            # Run analysis in background
+            thread = threading.Thread(target=self._run_analysis, args=(folder,))
             thread.daemon = True
             thread.start()
-    
-    def _run_analysis(self, folder_path: str):
-        """Run analysis in a thread."""
-        def output_callback(text):
-            self.root.after(0, lambda: self._emit(text))
-        
-        analyzer = FitAnalyzer(output_callback=output_callback)
-        self.analysis_results = []
-        
-        try:
-            results = analyzer.analyze_folder(folder_path)
-            self.analysis_results = results
-            
-            # Auto-export CSV if checkbox is checked
-            if self.export_csv_var.get() and results:
-                self.root.after(0, lambda: self._auto_export_csv(folder_path, results))
-            
-            self.root.after(0, lambda: self._analysis_complete(len(results)))
-        except Exception as e:
-            self.root.after(0, lambda: self._emit(f"\n❌ Error: {e}"))
-            self.root.after(0, lambda: self._analysis_complete(0, error=str(e)))
-    
-    def _auto_export_csv(self, folder_path: str, results: List[Dict[str, Any]]):
-        """Auto-export CSV after analysis completes."""
-        default_filename = os.path.join(folder_path, "garmin_analysis.csv")
-        self._save_csv(default_filename)
-    
-    def _analysis_complete(self, count: int, error: Optional[str] = None):
-        """Handle analysis completion."""
-        self.select_btn.config(state=tk.NORMAL)
-        
-        if error:
-            self.status_label.config(text=f"Error: {error}", fg="#f44336")
-            messagebox.showerror("Error", f"Analysis failed:\n{error}")
-        else:
-            self.status_label.config(text=f"Complete! Analyzed {count} file(s)", fg="#4CAF50")
-            
-            # Enable export button if we have results
-            if count > 0:
-                self.export_btn.config(state=tk.NORMAL)
-            else:
-                self.export_btn.config(state=tk.DISABLED)
-            
-            if count == 0:
-                messagebox.showwarning("No Files", "No .fit files found in the selected folder.")
-    
-    def _emit(self, text: str):
-        """Add text to output area."""
-        self.output_text.insert(tk.END, text + "\n")
-        self.output_text.see(tk.END)
-        self.root.update_idletasks()
-    
-    def copy_all(self):
-        """Copy all output text to clipboard."""
-        text = self.output_text.get(1.0, tk.END).strip()
-        if text:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            self.status_label.config(text="Copied to clipboard! 📋", fg="#4CAF50")
-    
-    def export_csv(self):
-        """Open file dialog to save CSV."""
-        if not self.analysis_results:
-            messagebox.showwarning("No Data", "No analysis results to export.")
-            return
-        
-        # Suggest filename based on folder
-        default_name = "garmin_analysis.csv"
-        if self.last_folder_path:
-            default_name = os.path.join(self.last_folder_path, default_name)
-        
-        filepath = filedialog.asksaveasfilename(
-            title="Save CSV Export",
-            defaultextension=".csv",
-            initialfile=default_name,
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-        )
-        
-        if filepath:
-            self._save_csv(filepath)
-    
-    def _save_csv(self, filepath: str):
-        """Save results to CSV file."""
-        if not self.analysis_results:
-            return
-        
-        try:
-            with open(filepath, 'w', newline='') as f:
-                if not self.analysis_results:
-                    return
-                    
-                # Get all keys from first result
-                fieldnames = list(self.analysis_results[0].keys())
-                
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                
-                for result in self.analysis_results:
-                    # Convert datetime objects to strings
-                    row = {}
-                    for key, value in result.items():
-                        if hasattr(value, 'strftime'):
-                            row[key] = value.strftime('%Y-%m-%d %H:%M:%S')
-                        elif value is None:
-                            row[key] = ''
-                        else:
-                            row[key] = value
-                    writer.writerow(row)
-            
-            self._emit(f"\n💾 CSV saved: {filepath}")
-            self.status_label.config(text=f"CSV saved! 💾", fg="#4CAF50")
-            messagebox.showinfo("Export Complete", f"CSV saved to:\n{filepath}")
-        except Exception as e:
-            messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}")
-    
-    def clear_output(self):
-        """Clear the output text area."""
-        self.output_text.delete(1.0, tk.END)
-        self.analysis_results = []
-        self.last_folder_path = None
-        self.export_btn.config(state=tk.DISABLED)
-        self.status_label.config(text="Ready - Select a folder to begin", fg="#666")
 
+    def _run_analysis(self, folder):
+        analyzer = FitAnalyzer(output_callback=lambda t: self.after(0, lambda: self._emit(t)))
+        try:
+            results = analyzer.analyze_folder(folder)
+            self.analysis_results = results
+            self.after(0, lambda: self._on_complete(len(results)))
+        except Exception as e:
+            self.after(0, lambda: self._emit(f"Error: {e}"))
+            self.after(0, lambda: self._on_complete(0))
+
+    def _on_complete(self, count):
+        self.btn_select.configure(state="normal")
+        self.lbl_status.configure(text=f"Dashboard ({count} runs)")
+        if count > 0:
+            self._update_graph() # This triggers the graph draw!
+            self.show_toast(f"Success! Processed {count} runs.")
+
+    def _emit(self, text):
+        self.txt_output.insert("end", text + "\n")
+        self.txt_output.see("end")
+
+    def _update_graph(self):
+        """Draws the Matplotlib graph in the Visuals tab."""
+        # Clear previous canvas if it exists
+        if self.canvas:
+            self.canvas.get_tk_widget().destroy()
+        
+        # Hide the "No data" label
+        if self.lbl_no_data.winfo_exists():
+            self.lbl_no_data.destroy()
+        
+        if not self.analysis_results:
+            return
+
+        # Prepare Data
+        dates = [r['date'] for r in self.analysis_results]
+        decoupling = [r.get('decoupling', 0) for r in self.analysis_results]
+        
+        # Setup Figure (Dark Theme)
+        plt.style.use('dark_background')
+        fig, ax = plt.subplots(figsize=(6, 4), dpi=100)
+        fig.patch.set_facecolor('#242424') # Match App BG
+        ax.set_facecolor('#242424')
+        
+        # Plot Logic: Dot vs Line
+        if len(dates) == 1:
+            # Single Dot - Add Annotation
+            ax.scatter(dates, decoupling, color='#3B8ED0', s=100, zorder=5)
+            ax.text(dates[0], decoupling[0] + 0.5, "Only 1 Run", ha='center', color='white')
+            ax.set_title("Aerobic Decoupling (Single Run)", color='white', pad=15)
+        else:
+            # Trend Line
+            ax.plot(dates, decoupling, marker='o', linestyle='-', color='#3B8ED0', linewidth=2, markersize=6)
+            ax.set_title("Aerobic Decoupling Trend", color='white', pad=15)
+
+        # Formatting
+        ax.axhline(y=5.0, color='#2FA572', linestyle='--', alpha=0.5, label='Good (<5%)') # Threshold
+        ax.set_ylabel("Decoupling (%)", color='gray')
+        ax.grid(True, color='#404040', linestyle='--', alpha=0.5)
+        ax.tick_params(colors='gray')
+        
+        # Date Formatting
+        if len(dates) > 1:
+            fig.autofmt_xdate()
+        
+        # Embed in Tkinter
+        self.canvas = FigureCanvasTkAgg(fig, master=self.tab_visuals)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(expand=True, fill="both", padx=10, pady=10)
+
+    def show_toast(self, msg):
+        toast = ctk.CTkFrame(self, fg_color="#2FA572", height=40, corner_radius=20)
+        toast.place(relx=0.5, rely=0.9, anchor="center")
+        ctk.CTkLabel(toast, text=msg, text_color="white", padx=20, pady=5).pack()
+        self.after(3000, toast.destroy)
+
+    def copy_all(self):
+        text = self.txt_output.get("1.0", "end-1c")
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.show_toast("Report copied!")
 
 def main():
-    """Entry point for the GUI application."""
-    root = tk.Tk()
-    
-    # Set app icon (works on Windows, Mac needs .icns)
-    try:
-        if sys.platform == "win32":
-            root.iconbitmap(default=None)  # Use default icon
-    except:
-        pass
-    
-    app = GarminAnalyzerGUI(root)
-    root.mainloop()
-
+    app = GarminAnalyzerGUI()
+    app.mainloop()
 
 if __name__ == "__main__":
     main()

@@ -4,5 +4,7 @@ pandas>=1.5.0
 numpy>=1.23.0
 
 # For building executables (optional)
+customtkinter>=5.0.0    # modern UI
+matplotlib>=3.7.0  # graphing
 pyinstaller>=5.0  # Windows
 py2app>=0.28      # macOS
