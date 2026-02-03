@@ -97,21 +97,24 @@ The output is designed to be easily copy-pasted into LLMs like Claude, ChatGPT, 
 - **Engine**: HR decoupling percentage with interpretation
 - **Form**: Ground contact time change
 
-### 🧠 Pro Tip: The "Coach-Level" Analysis Stack
+### 🧠 Pro Tip: Getting the most out of your Garmin data w/ this app
 
-For the most powerful insights, give the LLM the full picture by combining three data sources. This allows the AI to distinguish between a "bad day" and a "training trend."
+For the most powerful insights, combine these three data sources. This allows the AI to distinguish between a "bad day" and a "bad month."
 
-**1. The Macro (History)**
-* **Source:** Garmin Connect Web $\rightarrow$ Activities List $\rightarrow$ Export CSV.
-* **Why:** Provides your historical baseline. It lets the LLM see if your resting HR is rising or if your stride length has been shortening over the last month.
+**1. The Macro Trends (Scope: All History)**
+* **File:** `Activities.csv`
+* **Source:** Garmin Connect Web $\rightarrow$ *Activities List* $\rightarrow$ Export CSV.
+* **Why:** Provides your 90-day baseline. It tells the LLM if your fitness is trending up or down over time.
 
-**2. The Micro (Mechanics)**
+**2. This App's Report (Scope: This Run Only)**
+* **File:** Clipboard Text
 * **Source:** **Garmin Analyzer App** $\rightarrow$ "Copy for LLM".
-* **Why:** Provides the deep-dive internal metrics of *today's* run that Garmin hides (Aerobic Decoupling, Form Decay, Efficiency Factor).
+* **Why:** Provides the deep-dive mechanics (Decoupling, Form Efficiency) that Garmin Connect hides.
 
-**3. The Splits (Pacing)**
-* **Source:** Garmin Connect Web $\rightarrow$ Activity $\rightarrow$ Export Splits to CSV.
-* **Why:** Shows exactly *where* the breakdown happened (e.g., "Mile 18 was 30 seconds too fast, causing the drift in Mile 20").
+**3. The Splits (Scope: This Run Only)**
+* **File:** `activity_1234.csv`
+* **Source:** Garmin Connect Web $\rightarrow$ *Specific Activity* $\rightarrow$ Export Splits to CSV.
+* **Why:** Shows pacing strategy. It tells the LLM exactly *where* in the run you started to struggle.
 
 ### 📋 Recommended Prompt Strategy
 > "I am providing three pieces of data:
@@ -119,7 +122,7 @@ For the most powerful insights, give the LLM the full picture by combining three
 > 2. My **Splits** for today's run.
 > 3. The **Analyzer Report** for today's run (efficiency & decoupling).
 >
-> **Task:** Analyze today's performance in the context of my recent training load. Was the high cardiac drift caused by poor pacing (see Splits), or accumulated fatigue from the last 2 weeks (see Activities)?"
+> **Task:** Analyze today's performance in the context of my recent training load. Was the high cardiac drift caused by poor pacing (see Splits csv, attached), or accumulated fatigue from the last 2 weeks (see Activities csv, attached)?"
 
 ## Project Structure
 
