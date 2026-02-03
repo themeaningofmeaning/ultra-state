@@ -12,13 +12,14 @@ This project is built for serious runners who want deeper insights into efficien
 - 📁 **Folder Selection** - Pick any folder containing `.fit` files
 - 📉 **Trend Analysis** - Visualizes Aerobic Decoupling and Form metrics over time.
 - 🏃 **Running Metrics**:
-  - Grade Adjusted Pace (GAP)
-  - Heart Rate Decoupling
+  - **Grade Adjusted Pace (GAP):** Normalizes your effort on hills.
+  - **Aerobic Decoupling:** Measures cardiac drift / fatigue.
   - Form Analysis (Ground Contact Time)
   - Cadence & Power
   - Elevation Gain
+  - **Efficiency Factor (EF):** Tracks your engine size (Speed ÷ Heart Rate).
 - 📋 **Copy to Clipboard** - One-click copy for pasting into Claude/GPT/Gemini
-- 📊 **CSV Export** - [optional] Export all metrics to spreadsheet-compatible CSV
+- 📊 **CSV Export** - [optional] Export report as a CSV file for Excel/Sheets analysis.
 - 📋 **LLM Ready** - One-click copy for pasting a text report optimized for ChatGPT/Claude/Gemini.
 - 📦 **Standalone Executables** - No Python installation required for end users.
 - 🔄 **Cross-Platform** - Works on Windows and macOS
@@ -30,6 +31,15 @@ This project is built for serious runners who want deeper insights into efficien
 
 ### Trend Analysis (Matplotlib Integration)
 ![Graph View](assets/graph.png)
+
+### 🔍 How to Read the Diagnostic Graph
+
+The trend graph uses a unique 4-color system to grade the **Quality** of every run:
+
+- 🟢 **Green (High Quality):** High Efficiency + Low Decoupling. You were fast and stable. (Race Ready).
+- 🟡 **Yellow (Maintenance Quality for Base/Recovery):** Low Efficiency + Low Decoupling. A slow, easy aerobic maintenance run.
+- 🔴 **Red ("Expensive" Workout):** High Efficiency + High Decoupling. You ran fast, but your heart rate drifted significantly (>5%).
+- ⚫ **Dark (Slow & Struggling):** Low Efficiency + High Decoupling. You were slow *and* struggling. Rest needed.
 
 ## 🚀 Installation
 

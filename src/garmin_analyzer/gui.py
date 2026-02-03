@@ -1,264 +1,340 @@
-"""
-Garmin FIT File Analyzer - v2.1 (Stable)
-Features: Matplotlib Trends, Fixed Info Modal, Tabbed Interface.
-"""
-
 import customtkinter as ctk
-from tkinter import filedialog
+import tkinter as tk
+from tkinter import filedialog, messagebox
 import threading
-import sys
 import os
-import csv
-from typing import Optional, List, Dict, Any
-from datetime import datetime
-
-# --- GRAPHING IMPORTS (Crucial for the graph to work) ---
-import matplotlib
-matplotlib.use("TkAgg") # Force TkAgg backend for cross-platform stability
+import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import matplotlib.dates as mdates
+from .analyzer import FitAnalyzer
 
-# Ensure imports work for both dev and compiled app
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from garmin_analyzer.analyzer import FitAnalyzer
-
-# Enforce Dark Theme
+# Set theme
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 class InfoModal(ctk.CTkToplevel):
-    """Modern 'How-To' Modal Dialog."""
+    """Pop-up window to explain the graph metrics."""
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("How to Use")
-        self.geometry("420x380") # Slightly taller/wider for safety
-        self.resizable(False, False)
-        self.attributes("-topmost", True)
-        
-        # Center title
-        lbl = ctk.CTkLabel(
-            self, 
-            text="Quick Start Guide", 
-            font=ctk.CTkFont(size=20, weight="bold")
-        )
-        lbl.pack(pady=(25, 15))
-        
-        # Steps with wraplength to prevent cutoff
-        steps = (
-            "1. Log in to Garmin Connect on your web browser.\n\n"
-            "2. Download your activities as 'Original' (.FIT) files.\n\n"
-            "3. Move those .fit files into a single folder on your computer.\n\n"
-            "4. Click 'Select Folder' here to analyze them!"
-        )
-        
-        step_lbl = ctk.CTkLabel(
-            self, 
-            text=steps, 
-            justify="left", 
-            font=ctk.CTkFont(size=14), 
-            text_color="#E0E0E0",
-            wraplength=350 # Fixes the text cutoff issue
-        )
-        step_lbl.pack(pady=10, padx=30)
-        
-        # Close Button
-        btn = ctk.CTkButton(
-            self, 
-            text="Got it!", 
-            width=120,
-            height=35,
-            fg_color="#2FA572",
-            hover_color="#25855A", 
-            command=self.destroy
-        )
-        btn.pack(pady=25)
+        self.title("How to Read This Graph")
+        self.geometry("600x650") 
+        self.attributes("-topmost", True) 
 
-class GarminAnalyzerGUI(ctk.CTk):
+        # Title
+        title = ctk.CTkLabel(self, text="What do the dots mean?", font=("Arial", 22, "bold"), text_color="#2CC985")
+        title.pack(pady=(20, 10))
+
+        # Content - Using User's Custom Text
+        text = """
+1. 🟢 Green: High Quality (Fast & Stable)
+   • High Efficiency + Low Decoupling.
+   • You were fast and your heart rate was stable.
+   • Verdict: Race Ready.
+
+2. 🟡 Yellow: Maintenance Quality (Slow & Stable for RECOVERY / BASE)
+   • Lower Efficiency + Low Decoupling.
+   • You ran slower/easier, and your heart rate stayed calm.
+   • Verdict: Good aerobic maintenance run.
+
+3. 🔴 Red: "Expensive" Quality (Fast but Unstable)
+   • High Efficiency + High Decoupling.
+   • You ran fast, but your heart rate drifted up significantly (>5%).
+   • Verdict: Good speed, but lacks endurance (or dehydrated).
+
+4. ⚫ Black: The Bonk (Slow & Struggling)
+   • Low Efficiency + High Decoupling.
+   • You were slow AND your heart rate skyrocketed.
+   • Verdict: Fatigue, illness, or bad day. Rest up.
+
+--------------------------------------------------
+
+👣 CADENCE (Steps Per Minute)
+   • 170-180 spm (Green Band): The efficient goal zone.
+   • < 160 spm: Braking forces are higher. Try to shorten stride.
+"""
+        textbox = ctk.CTkTextbox(self, font=("Consolas", 14), width=500, height=500)
+        textbox.pack(padx=20, pady=10)
+        textbox.insert("0.0", text)
+        textbox.configure(state="disabled") 
+        
+        btn = ctk.CTkButton(self, text="Got it!", command=self.destroy, fg_color="#2CC985", text_color="black")
+        btn.pack(pady=20)
+
+class GarminAnalyzerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Garmin FIT Analyzer")
-        self.geometry("1100x800")
-        
-        # Layout: Sidebar + Main
+
+        self.title("Garmin FIT Analyzer v2.2")
+        self.geometry("1100x850")
+
+        self.run_data = []
+        self.df = None
+
+        # --- LAYOUT ---
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
-        
-        self.analysis_results: List[Dict[str, Any]] = []
-        self.last_folder_path: Optional[str] = None
-        
-        self._create_widgets()
 
-    def _create_widgets(self):
-        # --- SIDEBAR ---
-        self.sidebar = ctk.CTkFrame(self, width=240, corner_radius=0)
+        # 1. Sidebar
+        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(4, weight=1)
-        
-        self.logo = ctk.CTkLabel(self.sidebar, text="RUN ANALYZER", font=ctk.CTkFont(size=24, weight="bold"))
-        self.logo.grid(row=0, column=0, padx=20, pady=(50, 40))
-        
-        self.btn_select = ctk.CTkButton(
-            self.sidebar, text="📂  Select Folder", height=45, 
-            font=ctk.CTkFont(size=15, weight="bold"), command=self.select_folder
-        )
-        self.btn_select.grid(row=1, column=0, padx=30, pady=10)
-        
-        # Info Button
-        self.btn_info = ctk.CTkButton(
-            self.sidebar, text="ⓘ  How it works", height=30,
-            fg_color="transparent", border_width=1, text_color="gray70",
-            command=self.open_info
-        )
-        self.btn_info.grid(row=2, column=0, padx=30, pady=10)
+        self.sidebar.grid_rowconfigure(5, weight=1)
 
-        # Version
-        self.lbl_ver = ctk.CTkLabel(self.sidebar, text="v2.1", text_color="gray40")
-        self.lbl_ver.grid(row=5, column=0, padx=20, pady=20, sticky="s")
+        self.logo_label = ctk.CTkLabel(self.sidebar, text="Garmin\nAnalyzer 🏃‍♂️", font=ctk.CTkFont(size=20, weight="bold"))
+        self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 10))
 
-        # --- MAIN AREA (Tabs) ---
-        self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.main_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
-        self.main_frame.grid_rowconfigure(1, weight=1)
-        self.main_frame.grid_columnconfigure(0, weight=1)
+        self.btn_load = ctk.CTkButton(self.sidebar, text="📂 Select Folder", command=self.select_folder)
+        self.btn_load.grid(row=1, column=0, padx=20, pady=10)
+
+        self.btn_csv = ctk.CTkButton(self.sidebar, text="💾 Export CSV", command=self.save_csv, state="disabled")
+        self.btn_csv.grid(row=2, column=0, padx=20, pady=10)
+
+        self.btn_copy = ctk.CTkButton(self.sidebar, text="📋 Copy for LLM", command=self.copy_to_clipboard, state="disabled", fg_color="#2CC985", text_color="black")
+        self.btn_copy.grid(row=3, column=0, padx=20, pady=10)
+
+        self.status_label = ctk.CTkLabel(self.sidebar, text="Ready", text_color="gray")
+        self.status_label.grid(row=6, column=0, padx=20, pady=20)
         
-        # Header
-        self.header = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        self.lbl_status = ctk.CTkLabel(self.header, text="Dashboard", font=ctk.CTkFont(size=24, weight="bold"))
-        self.lbl_status.pack(side="left")
-
-        # Tabs: Report vs Visuals
-        self.tabs = ctk.CTkTabview(self.main_frame)
-        self.tabs.grid(row=1, column=0, sticky="nsew")
-        self.tab_report = self.tabs.add("📝 Text Report")
-        self.tab_visuals = self.tabs.add("📈 Trend Graph")
+        # --- LOADING HUD (Real Progress Bar) ---
+        self.progress_frame = ctk.CTkFrame(self, fg_color="#1F1F1F", border_width=2, border_color="#2CC985", corner_radius=15, width=350, height=80)
+        self.progress_frame.grid_propagate(False) 
         
-        # Tab 1: Text Output
-        self.tab_report.grid_columnconfigure(0, weight=1)
-        self.tab_report.grid_rowconfigure(0, weight=1)
-        self.txt_output = ctk.CTkTextbox(self.tab_report, font=("Consolas", 14), fg_color="#181818")
-        self.txt_output.grid(row=0, column=0, sticky="nsew")
-        self._emit("👋 Welcome!\n\nClick 'Select Folder' to analyze your runs.\nClick 'How it works' if you are new here.")
-
-        # Tab 2: Visuals (Empty initially)
-        self.tab_visuals.grid_columnconfigure(0, weight=1)
-        self.tab_visuals.grid_rowconfigure(0, weight=1)
-        self.lbl_no_data = ctk.CTkLabel(self.tab_visuals, text="No data loaded yet.", text_color="gray")
-        self.lbl_no_data.grid(row=0, column=0)
-        self.canvas = None
-
-        # --- ACTION BAR ---
-        self.actions = ctk.CTkFrame(self.main_frame, fg_color="transparent", height=50)
-        self.actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.progress_label = ctk.CTkLabel(self.progress_frame, text="ANALYZING FIT FILES...", font=("Arial", 14, "bold"), text_color="white")
+        self.progress_label.place(relx=0.5, rely=0.3, anchor="center")
         
-        self.btn_copy = ctk.CTkButton(
-            self.actions, text="📋 Copy for LLM", width=160, height=35,
-            fg_color="#2FA572", font=ctk.CTkFont(weight="bold"), command=self.copy_all
-        )
-        self.btn_copy.pack(side="right")
+        self.progress = ctk.CTkProgressBar(self.progress_frame, mode="determinate", width=250, height=12, progress_color="#2CC985")
+        self.progress.set(0)
+        self.progress.place(relx=0.5, rely=0.7, anchor="center")
 
-    # --- LOGIC ---
-    def open_info(self):
-        InfoModal(self)
+        # 2. Main Area
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        
+        # Tab 1: Report
+        self.tab_report = self.tabview.add("📄 Report")
+        self.textbox = ctk.CTkTextbox(self.tab_report, font=("Consolas", 14))
+        self.textbox.pack(fill="both", expand=True)
+
+        # --- WELCOME MESSAGE (CENTERED) ---
+        self.textbox.tag_config("center", justify="center")
+        welcome_text = "\n\n\n👋 Welcome to Garmin Analyzer!\n\n1. Click '📂 Select Folder' on the left.\n2. Choose your folder of .FIT files.\n3. Watch the magic happen."
+        self.textbox.insert("0.0", welcome_text, "center")
+
+        # Tab 2: Graphs
+        self.tab_graph = self.tabview.add("📈 Trend Analysis")
+        
+        # Controls
+        self.graph_controls = ctk.CTkFrame(self.tab_graph, fg_color="transparent", height=30)
+        self.graph_controls.pack(fill="x", padx=5, pady=5)
+        self.btn_info = ctk.CTkButton(self.graph_controls, text="❓ What do the dots mean?", command=self.open_guide, width=180, height=24, fg_color="#444", hover_color="#555")
+        self.btn_info.pack(side="right")
+
+        self.graph_frame = ctk.CTkFrame(self.tab_graph)
+        self.graph_frame.pack(fill="both", expand=True)
 
     def select_folder(self):
-        folder = filedialog.askdirectory(mustexist=True)
-        if folder:
-            self.txt_output.delete("1.0", "end")
-            self._emit(f"📂 Analyzing: {folder}...\n")
-            self.lbl_status.configure(text="Analyzing...")
-            self.btn_select.configure(state="disabled")
-            
-            # Run analysis in background
-            thread = threading.Thread(target=self._run_analysis, args=(folder,))
-            thread.daemon = True
-            thread.start()
+        folder_selected = filedialog.askdirectory()
+        if folder_selected:
+            self.btn_load.configure(state="disabled")
+            self.progress_frame.place(relx=0.6, rely=0.5, anchor="center")
+            self.progress_frame.lift()
+            self.progress.set(0) # Reset to 0
+            threading.Thread(target=self.run_analysis, args=(folder_selected,), daemon=True).start()
 
-    def _run_analysis(self, folder):
-        analyzer = FitAnalyzer(output_callback=lambda t: self.after(0, lambda: self._emit(t)))
-        try:
-            results = analyzer.analyze_folder(folder)
-            self.analysis_results = results
-            self.after(0, lambda: self._on_complete(len(results)))
-        except Exception as e:
-            self.after(0, lambda: self._emit(f"Error: {e}"))
-            self.after(0, lambda: self._on_complete(0))
+    def run_analysis(self, folder):
+        analyzer = FitAnalyzer(output_callback=self.update_log, progress_callback=self.update_progress)
+        results = analyzer.analyze_folder(folder)
+        self.after(0, lambda: self.display_results(results))
 
-    def _on_complete(self, count):
-        self.btn_select.configure(state="normal")
-        self.lbl_status.configure(text=f"Dashboard ({count} runs)")
-        if count > 0:
-            self._update_graph() # This triggers the graph draw!
-            self.show_toast(f"Success! Processed {count} runs.")
+    def update_progress(self, current, total):
+        if total > 0:
+            val = current / total
+            self.progress.set(val)
+            self.progress_label.configure(text=f"ANALYZING... ({current}/{total})")
 
-    def _emit(self, text):
-        self.txt_output.insert("end", text + "\n")
-        self.txt_output.see("end")
+    def update_log(self, text):
+        print(text)
 
-    def _update_graph(self):
-        """Draws the Matplotlib graph in the Visuals tab."""
-        # Clear previous canvas if it exists
-        if self.canvas:
-            self.canvas.get_tk_widget().destroy()
+    def display_results(self, results):
+        self.progress_frame.place_forget()
+
+        self.run_data = results
+        self.df = pd.DataFrame(results)
         
-        # Hide the "No data" label
-        if self.lbl_no_data.winfo_exists():
-            self.lbl_no_data.destroy()
+        avg_ef = 0
+        if not self.df.empty:
+            self.df['date_obj'] = pd.to_datetime(self.df['date'])
+            self.df = self.df.sort_values('date_obj')
+            avg_ef = self.df['efficiency_factor'].mean() # Calculate folder average
+
+        # Report
+        report_text = ""
+        for data in results:
+            # Pass the average EF to the formatter for comparison
+            report_text += self.format_run_data(data, avg_ef)
+            report_text += "\n" + "="*40 + "\n"
+
+        self.textbox.delete("0.0", "end")
+        self.textbox.insert("0.0", report_text)
         
-        if not self.analysis_results:
+        # Graphs
+        self.plot_trends()
+
+        self.status_label.configure(text=f"Analyzed {len(results)} files")
+        self.btn_load.configure(state="normal")
+        self.btn_csv.configure(state="normal")
+        self.btn_copy.configure(state="normal")
+
+    def format_run_data(self, d, folder_avg_ef=0):
+        # 1. Device Sensor Logic
+        def safe_fmt(val, unit=""):
+            if val is None or str(val).lower() == "nan" or val == 0:
+                return "-- (Requires Device w/ Sensor)"
+            return f"{val}{unit}"
+
+        # 2. Logic: Aerobic Decoupling (Fatigue)
+        decoupling = d.get('decoupling')
+        d_status = ""
+        if decoupling < 5:
+            d_status = " (✅ Excellent)"
+        elif decoupling <= 10:
+            d_status = " (⚠️ Moderate Drift)"
+        else:
+            d_status = " (🛑 High Fatigue)"
+
+        # 3. Logic: Cadence (Form)
+        cadence = d.get('avg_cadence')
+        c_status = ""
+        if cadence and cadence > 170:
+            c_status = " (✅ Efficient)"
+        elif cadence and cadence >= 160:
+            c_status = " (👌 Good)"
+        elif cadence:
+            c_status = " (⚠️ Overstriding)"
+
+        # 4. Logic: Efficiency Factor (Engine)
+        ef = d.get('efficiency_factor')
+        e_status = ""
+        if folder_avg_ef > 0 and ef > folder_avg_ef:
+            e_status = " (📈 Building Fitness)"
+        elif folder_avg_ef > 0:
+            e_status = " (📉 Below Average)"
+
+        return f"""
+RUN: {d.get('date')} ({d.get('filename')})
+--------------------------------------------------
+[1] PRIMARY STATS
+    Distance:   {d.get('distance_mi')} mi
+    Pace:       {d.get('pace')} /mi
+    GAP:        {d.get('gap_pace')} /mi (Grade Adjusted)
+    Elevation:  {d.get('elevation_ft')} ft gain
+
+[2] EFFICIENCY & ENGINE
+    Efficiency Factor (EF): {ef}{e_status} (Target: > 1.3)
+    Aerobic Decoupling:     {decoupling}%{d_status}
+    Avg Power:              {safe_fmt(d.get('avg_power'), " W")}
+
+[3] INTERNAL LOAD (CONTEXT)
+    Avg Heart Rate:   {d.get('avg_hr')} bpm
+    Respiration Rate: {safe_fmt(d.get('avg_resp'), " brpm")}
+    Avg Temperature:  {safe_fmt(d.get('avg_temp'), "°C")}
+
+[4] FORM MECHANICS
+    Cadence:         {cadence} spm{c_status}
+    Vertical Ratio:  {safe_fmt(d.get('v_ratio'), "%")}
+    GCT Balance:     {safe_fmt(d.get('gct_balance'), "% L/R")}
+    GCT Drift:       {d.get('gct_change')} ms
+"""
+
+    def plot_trends(self):
+        for widget in self.graph_frame.winfo_children():
+            widget.destroy()
+
+        if self.df is None or self.df.empty:
             return
 
-        # Prepare Data
-        dates = [r['date'] for r in self.analysis_results]
-        decoupling = [r.get('decoupling', 0) for r in self.analysis_results]
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8), sharex=True)
+        fig.patch.set_facecolor('#2b2b2b')
         
-        # Setup Figure (Dark Theme)
-        plt.style.use('dark_background')
-        fig, ax = plt.subplots(figsize=(6, 4), dpi=100)
-        fig.patch.set_facecolor('#242424') # Match App BG
-        ax.set_facecolor('#242424')
+        dates = self.df['date_obj']
         
-        # Plot Logic: Dot vs Line
-        if len(dates) == 1:
-            # Single Dot - Add Annotation
-            ax.scatter(dates, decoupling, color='#3B8ED0', s=100, zorder=5)
-            ax.text(dates[0], decoupling[0] + 0.5, "Only 1 Run", ha='center', color='white')
-            ax.set_title("Aerobic Decoupling (Single Run)", color='white', pad=15)
+        # --- PLOT 1: EFFICIENCY (With Smart Dots) ---
+        ax1.axhspan(-5, 5, color='#2CC985', alpha=0.15)
+        ax1.text(dates.iloc[0], 0, " OPTIMAL STABILITY ZONE (Decoupling)", color='#2CC985', fontsize=8, va='center', fontweight='bold')
+        
+        line1, = ax1.plot(dates, self.df['decoupling'], color='#ff4d4d', alpha=0.5, linewidth=1, label='Decoupling % (Keep in Green Band)')
+        
+        ax1b = ax1.twinx()
+        line2, = ax1b.plot(dates, self.df['efficiency_factor'], color='#2CC985', alpha=0.3, linestyle='--', label='Efficiency Factor (Should Trend Up)')
+        
+        ef_mean = self.df['efficiency_factor'].mean()
+        dot_colors = []
+        for index, row in self.df.iterrows():
+            d = row['decoupling']
+            e = row['efficiency_factor']
+            if e >= ef_mean and d <= 5: dot_colors.append('#2CC985')
+            elif e >= ef_mean and d > 5: dot_colors.append('#ff4d4d')
+            elif e < ef_mean and d <= 5: dot_colors.append('#e6e600')
+            else: dot_colors.append('black')
+
+        ax1.scatter(dates, self.df['decoupling'], c=dot_colors, s=50, edgecolors='white', linewidth=1, zorder=5)
+
+        ax1.set_ylabel('Decoupling (%)', color='white')
+        ax1.set_title('Diagnostic Trend (Color = Run Quality)', color='white')
+        ax1.grid(True, alpha=0.3)
+        ax1.tick_params(colors='white')
+        ax1b.set_ylabel('Efficiency Factor', color='#2CC985')
+        ax1b.tick_params(axis='y', colors='#2CC985')
+        
+        ax1.legend([line1, line2], [line1.get_label(), line2.get_label()], loc='upper left', fontsize=8, facecolor='#2b2b2b', labelcolor='white')
+
+        # --- PLOT 2: FORM (With Cadence Band) ---
+        if self.df['v_ratio'].max() > 0:
+            ax2.plot(dates, self.df['v_ratio'], marker='^', color='#4d94ff', label='Vertical Ratio')
+            ax2.set_ylabel('Vertical Ratio (%)', color='white')
+            ax2.set_title('Form Efficiency', color='white')
         else:
-            # Trend Line
-            ax.plot(dates, decoupling, marker='o', linestyle='-', color='#3B8ED0', linewidth=2, markersize=6)
-            ax.set_title("Aerobic Decoupling Trend", color='white', pad=15)
+            ax2.axhspan(170, 180, color='#2CC985', alpha=0.15, label='Goal Zone (170-180)')
+            ax2.plot(dates, self.df['avg_cadence'], marker='o', color='#ffa31a', label='Cadence')
+            ax2.set_ylabel('Cadence (spm)', color='white')
+            ax2.set_title('Cadence Trend', color='white')
 
-        # Formatting
-        ax.axhline(y=5.0, color='#2FA572', linestyle='--', alpha=0.5, label='Good (<5%)') # Threshold
-        ax.set_ylabel("Decoupling (%)", color='gray')
-        ax.grid(True, color='#404040', linestyle='--', alpha=0.5)
-        ax.tick_params(colors='gray')
-        
-        # Date Formatting
-        if len(dates) > 1:
-            fig.autofmt_xdate()
-        
-        # Embed in Tkinter
-        self.canvas = FigureCanvasTkAgg(fig, master=self.tab_visuals)
-        self.canvas.draw()
-        self.canvas.get_tk_widget().pack(expand=True, fill="both", padx=10, pady=10)
+        ax2.grid(True, alpha=0.3)
+        ax2.tick_params(colors='white')
+        ax2.legend(loc='upper left', fontsize=8, facecolor='#2b2b2b', labelcolor='white')
+        plt.xticks(rotation=45)
 
-    def show_toast(self, msg):
-        toast = ctk.CTkFrame(self, fg_color="#2FA572", height=40, corner_radius=20)
-        toast.place(relx=0.5, rely=0.9, anchor="center")
-        ctk.CTkLabel(toast, text=msg, text_color="white", padx=20, pady=5).pack()
-        self.after(3000, toast.destroy)
+        canvas = FigureCanvasTkAgg(fig, master=self.graph_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
 
-    def copy_all(self):
-        text = self.txt_output.get("1.0", "end-1c")
+    def save_csv(self):
+        if self.df is None: return
+        filename = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if filename:
+            cols = [
+                'date', 'filename', 'distance_mi', 'pace', 'gap_pace', 
+                'efficiency_factor', 'decoupling', 
+                'avg_hr', 'avg_resp', 'avg_temp', 
+                'avg_power', 'avg_cadence', 
+                'v_ratio', 'gct_balance', 'gct_change', 
+                'elevation_ft', 'moving_time_min', 'rest_time_min'
+            ]
+            valid_cols = [c for c in cols if c in self.df.columns]
+            self.df[valid_cols].to_csv(filename, index=False)
+            messagebox.showinfo("Success", "CSV Exported Successfully!")
+
+    def copy_to_clipboard(self):
+        text = self.textbox.get("0.0", "end")
         self.clipboard_clear()
         self.clipboard_append(text)
-        self.show_toast("Report copied!")
+        self.btn_copy.configure(text="✅ Copied!", fg_color="white")
+        self.after(2000, lambda: self.btn_copy.configure(text="📋 Copy for LLM", fg_color="#2CC985"))
+        
+    def open_guide(self):
+        InfoModal(self)
 
 def main():
-    app = GarminAnalyzerGUI()
+    app = GarminAnalyzerApp()
     app.mainloop()
 
 if __name__ == "__main__":
