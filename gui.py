@@ -4,9 +4,8 @@ from tkinter import filedialog, messagebox
 import threading
 import os
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from .analyzer import FitAnalyzer
+# NOTE: Absolute import (No dot!)
+from analyzer import FitAnalyzer
 
 # Set theme
 ctk.set_appearance_mode("Dark")
@@ -24,7 +23,7 @@ class InfoModal(ctk.CTkToplevel):
         title = ctk.CTkLabel(self, text="What do the dots mean?", font=("Arial", 22, "bold"), text_color="#2CC985")
         title.pack(pady=(20, 10))
 
-        # Content - Using User's Custom Text
+        # Content
         text = """
 1. 🟢 Green: High Quality (Fast & Stable)
    • High Efficiency + Low Decoupling.
@@ -66,6 +65,13 @@ class GarminAnalyzerApp(ctk.CTk):
 
         self.title("Garmin FIT Analyzer v2.2")
         self.geometry("1100x850")
+        
+        # --- MAC OS FIX: Force Window to Front ---
+        self.lift()
+        self.focus_force()
+        self.attributes('-topmost', True)
+        self.after_idle(self.attributes, '-topmost', False)
+        # -----------------------------------------
 
         self.run_data = []
         self.df = None
@@ -94,7 +100,7 @@ class GarminAnalyzerApp(ctk.CTk):
         self.status_label = ctk.CTkLabel(self.sidebar, text="Ready", text_color="gray")
         self.status_label.grid(row=6, column=0, padx=20, pady=20)
         
-        # --- LOADING HUD (Real Progress Bar) ---
+        # --- LOADING HUD ---
         self.progress_frame = ctk.CTkFrame(self, fg_color="#1F1F1F", border_width=2, border_color="#2CC985", corner_radius=15, width=350, height=80)
         self.progress_frame.grid_propagate(False) 
         
@@ -114,7 +120,7 @@ class GarminAnalyzerApp(ctk.CTk):
         self.textbox = ctk.CTkTextbox(self.tab_report, font=("Consolas", 14))
         self.textbox.pack(fill="both", expand=True)
 
-        # --- WELCOME MESSAGE (CENTERED) ---
+        # --- WELCOME MESSAGE ---
         self.textbox.tag_config("center", justify="center")
         welcome_text = "\n\n\n👋 Welcome to Garmin Analyzer!\n\n1. Click '📂 Select Folder' on the left.\n2. Choose your folder of .FIT files.\n3. Watch the magic happen."
         self.textbox.insert("0.0", welcome_text, "center")
@@ -137,7 +143,7 @@ class GarminAnalyzerApp(ctk.CTk):
             self.btn_load.configure(state="disabled")
             self.progress_frame.place(relx=0.6, rely=0.5, anchor="center")
             self.progress_frame.lift()
-            self.progress.set(0) # Reset to 0
+            self.progress.set(0)
             threading.Thread(target=self.run_analysis, args=(folder_selected,), daemon=True).start()
 
     def run_analysis(self, folder):
@@ -164,19 +170,16 @@ class GarminAnalyzerApp(ctk.CTk):
         if not self.df.empty:
             self.df['date_obj'] = pd.to_datetime(self.df['date'])
             self.df = self.df.sort_values('date_obj')
-            avg_ef = self.df['efficiency_factor'].mean() # Calculate folder average
+            avg_ef = self.df['efficiency_factor'].mean()
 
-        # Report
         report_text = ""
         for data in results:
-            # Pass the average EF to the formatter for comparison
             report_text += self.format_run_data(data, avg_ef)
             report_text += "\n" + "="*40 + "\n"
 
         self.textbox.delete("0.0", "end")
         self.textbox.insert("0.0", report_text)
         
-        # Graphs
         self.plot_trends()
 
         self.status_label.configure(text=f"Analyzed {len(results)} files")
@@ -185,39 +188,27 @@ class GarminAnalyzerApp(ctk.CTk):
         self.btn_copy.configure(state="normal")
 
     def format_run_data(self, d, folder_avg_ef=0):
-        # 1. Device Sensor Logic
         def safe_fmt(val, unit=""):
             if val is None or str(val).lower() == "nan" or val == 0:
                 return "-- (Requires Device w/ Sensor)"
             return f"{val}{unit}"
 
-        # 2. Logic: Aerobic Decoupling (Fatigue)
         decoupling = d.get('decoupling')
         d_status = ""
-        if decoupling < 5:
-            d_status = " (✅ Excellent)"
-        elif decoupling <= 10:
-            d_status = " (⚠️ Moderate Drift)"
-        else:
-            d_status = " (🛑 High Fatigue)"
+        if decoupling < 5: d_status = " (✅ Excellent)"
+        elif decoupling <= 10: d_status = " (⚠️ Moderate Drift)"
+        else: d_status = " (🛑 High Fatigue)"
 
-        # 3. Logic: Cadence (Form)
         cadence = d.get('avg_cadence')
         c_status = ""
-        if cadence and cadence > 170:
-            c_status = " (✅ Efficient)"
-        elif cadence and cadence >= 160:
-            c_status = " (👌 Good)"
-        elif cadence:
-            c_status = " (⚠️ Overstriding)"
+        if cadence and cadence > 170: c_status = " (✅ Efficient)"
+        elif cadence and cadence >= 160: c_status = " (👌 Good)"
+        elif cadence: c_status = " (⚠️ Overstriding)"
 
-        # 4. Logic: Efficiency Factor (Engine)
         ef = d.get('efficiency_factor')
         e_status = ""
-        if folder_avg_ef > 0 and ef > folder_avg_ef:
-            e_status = " (📈 Building Fitness)"
-        elif folder_avg_ef > 0:
-            e_status = " (📉 Below Average)"
+        if folder_avg_ef > 0 and ef > folder_avg_ef: e_status = " (📈 Building Fitness)"
+        elif folder_avg_ef > 0: e_status = " (📉 Below Average)"
 
         return f"""
 RUN: {d.get('date')} ({d.get('filename')})
@@ -246,6 +237,11 @@ RUN: {d.get('date')} ({d.get('filename')})
 """
 
     def plot_trends(self):
+        import matplotlib
+        matplotlib.use("TkAgg")
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
         for widget in self.graph_frame.winfo_children():
             widget.destroy()
 
@@ -257,7 +253,6 @@ RUN: {d.get('date')} ({d.get('filename')})
         
         dates = self.df['date_obj']
         
-        # --- PLOT 1: EFFICIENCY (With Smart Dots) ---
         ax1.axhspan(-5, 5, color='#2CC985', alpha=0.15)
         ax1.text(dates.iloc[0], 0, " OPTIMAL STABILITY ZONE (Decoupling)", color='#2CC985', fontsize=8, va='center', fontweight='bold')
         
@@ -287,7 +282,6 @@ RUN: {d.get('date')} ({d.get('filename')})
         
         ax1.legend([line1, line2], [line1.get_label(), line2.get_label()], loc='upper left', fontsize=8, facecolor='#2b2b2b', labelcolor='white')
 
-        # --- PLOT 2: FORM (With Cadence Band) ---
         if self.df['v_ratio'].max() > 0:
             ax2.plot(dates, self.df['v_ratio'], marker='^', color='#4d94ff', label='Vertical Ratio')
             ax2.set_ylabel('Vertical Ratio (%)', color='white')

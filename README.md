@@ -69,7 +69,7 @@ source venv/bin/activate  # On macOS/Linux
 pip install -r requirements.txt
 
 # Run the application
-python -m src.garmin_analyzer.gui
+python gui.py
 ```
 
 ## Building Executables
@@ -140,17 +140,13 @@ For the most powerful insights, combine these three data sources. This allows th
 
 ```
 garmin-fit-analyzer/
-├── src/
-│   └── garmin_analyzer/
-│       ├── __init__.py
-│       ├── analyzer.py      # Core analysis logic
-│       └── gui.py           # GUI & Matplotlib charts
-├── assets/                  # README screenshots
-├── build_mac.sh             # Mac build script
-├── build_windows.bat        # Windows build script
-├── runner.icns              # Mac App Icon
-├── runner.ico               # Windows App Icon
-├── requirements.txt         # Dependencies
+├── analyzer.py       # Core analysis logic (moved to root)
+├── gui.py            # Main application entry point (moved to root)
+├── assets/           # README screenshots
+├── build_mac.sh      # Mac build script
+├── build_windows.bat # Windows build script
+├── runner.icns       # App Icons
+├── requirements.txt  # Dependencies
 └── README.md
 ```
 
