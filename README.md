@@ -1,6 +1,6 @@
 # Garmin FIT Analyzer 🏃‍♂️💨
 
-Garmin FIT Analyzer is a cross-platform desktop application designed to unlock advanced running metrics hidden by standard platforms. It features a modern GUI for batch processing files and generating data specifically optimized for analysis by your LLM of choice (ChatGPT, Claude, Gemini, whatever).
+Garmin FIT Analyzer is a cross-platform desktop application for runners designed to unlock advanced running metrics hidden by standard platforms. It features a modern GUI for batch processing files and generating data specifically optimized for analysis by your LLM of choice (ChatGPT, Claude, Gemini, whatever).
 
 This project is built for serious runners who want deeper insights into efficiency and form.  It's not garbage data - if you feed this into your homerolled LLM running coach, it will help you can tailor your form (cadence), avoid or heal from injuries, and maximize a training plan based on your own body's every-changing capabilities (do hill spints on tuesday, rest tomorrow to lock in gains, do a pace run on Friday, etc.).  Like our training, this tool is a work in progress so contributions, suggestions, and positive vibes will help us all.
 
@@ -32,7 +32,7 @@ This project is built for serious runners who want deeper insights into efficien
 ### Trend Analysis (Matplotlib Integration)
 ![Graph View](assets/graph.png)
 
-### 🔍 How to Read the Diagnostic Graph
+### 📈 How to Read the Diagnostic Graph
 
 The trend graph uses a unique 4-color system to grade the **Quality** of every run:
 
@@ -48,8 +48,8 @@ The trend graph uses a unique 4-color system to grade the **Quality** of every r
 Don't want to mess with Python code? No problem.
 
 1. **[Click here to go to the Releases page](https://github.com/themeaningofmeaning/garmin-fit-analyzer/releases).**
-2. **Mac Users:** Download `GarminAnalyzer.dmg`.
-3. **Windows Users:** Download `GarminAnalyzer.zip`, unzip it, and run the app inside.
+2. 🍎**Mac Users:** Download `GarminAnalyzer.dmg`.
+3. 🪟**Windows Users:** Download `GarminAnalyzer.zip`, unzip it, and run the app inside.
 
 ### Option 2: Run from Source (For Developers)
 
@@ -89,7 +89,7 @@ build_windows.bat
 # Note: You must manually zip this folder to share it.
 ```
 
-## What the Metrics Mean
+## 🔍 What the Metrics Mean
 
 | Metric | Description | Good Range |
 |--------|-------------|------------|
@@ -98,7 +98,7 @@ build_windows.bat
 | **Ground Contact Time** | Time foot stays on ground | 200-300ms typical |
 | **Cadence** | Steps per minute | 170-180 spm optimal |
 
-## LLM Integration
+## 💬 LLM Integration
 
 The output is designed to be easily copy-pasted into LLMs like Claude, ChatGPT, or Gemini for deeper analysis. Each run report includes:
 
@@ -136,7 +136,7 @@ For the most powerful insights, combine these three data sources. This allows th
 >
 > **Task:** Analyze today's performance in the context of my recent training load. Was the high cardiac drift caused by poor pacing (see Splits csv, attached), or accumulated fatigue from the last 2 weeks (see Activities csv, attached)?"
 
-## Project Structure
+## 📂 Project Structure
 
 ```
 garmin-fit-analyzer/

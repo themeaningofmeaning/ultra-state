@@ -256,10 +256,10 @@ RUN: {d.get('date')} ({d.get('filename')})
         ax1.axhspan(-5, 5, color='#2CC985', alpha=0.15)
         ax1.text(dates.iloc[0], 0, " OPTIMAL STABILITY ZONE (Decoupling)", color='#2CC985', fontsize=8, va='center', fontweight='bold')
         
-        line1, = ax1.plot(dates, self.df['decoupling'], color='#ff4d4d', alpha=0.5, linewidth=1, label='Decoupling % (Keep in Green Band)')
+        line1, = ax1.plot(dates, self.df['decoupling'], color='#ff4d4d', alpha=0.5, linewidth=1, label='Decoupling % (keep in green band)')
         
         ax1b = ax1.twinx()
-        line2, = ax1b.plot(dates, self.df['efficiency_factor'], color='#2CC985', alpha=0.3, linestyle='--', label='Efficiency Factor (Should Trend Up)')
+        line2, = ax1b.plot(dates, self.df['efficiency_factor'], color='#2CC985', alpha=0.3, linestyle='--', label='Efficiency Factor (should trend up)')
         
         ef_mean = self.df['efficiency_factor'].mean()
         dot_colors = []
