@@ -2,7 +2,7 @@
 
 Garmin FIT Analyzer is a cross-platform desktop application for runners designed to unlock advanced running metrics hidden by standard platforms. It features a modern GUI for batch processing files and generating data specifically optimized for analysis by your LLM of choice (ChatGPT, Claude, Gemini, whatever).
 
-This project is built for serious runners who want deeper insights into efficiency and form.  It's not garbage data - if you feed this into your homerolled LLM running coach, it will help you can tailor your form (cadence), avoid or heal from injuries, and maximize a training plan based on your own body's every-changing capabilities (do hill spints on tuesday, rest tomorrow to lock in gains, do a pace run on Friday, etc.).  Like our training, this tool is a work in progress so contributions, suggestions, and positive vibes will help us all.
+This project is built for serious runners who want deeper insights into efficiency and form.  It's not garbage data - if you feed this into your homerolled LLM running coach, it will help you adjust your form (cadence), avoid or heal from injuries, and maximize a weekly training plan based on your own body's every-changing capabilities (ex. x12 hill spints on Tue, rest Wed to lock in gains, 10 mile pace run Fri, etc.).  Like our training, this tool is a work in progress so contributions, suggestions, and positive vibes will help us all.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
@@ -26,13 +26,13 @@ This project is built for serious runners who want deeper insights into efficien
 
 ## 📸 Screenshots
 
-### The Dashboard
+### The Run Report
 ![Dashboard View](assets/dashboard.png)
 
-### Trend Analysis (Matplotlib Integration)
+### Trend Analysis (aerobic decoupling, efficiency, & cadence)
 ![Graph View](assets/graph.png)
 
-### 📈 How to Read the Diagnostic Graph
+### 📈 How to Read the Graph
 
 The trend graph uses a unique 4-color system to grade the **Quality** of every run:
 
