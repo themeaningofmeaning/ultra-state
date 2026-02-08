@@ -1,23 +1,32 @@
 #!/bin/bash
 set -e
 
-echo "🍎 Building Garmin Analyzer (v2.3 Flat Structure)..."
+echo "🍎 Building Garmin Analyzer Pro (NiceGUI)..."
 
-# 1. Clean previous builds
+# 1. Get NiceGUI path dynamically
+NICEGUI_PATH=$(python3 -c "import nicegui; import os; print(os.path.dirname(nicegui.__file__))")
+echo "📦 Found NiceGUI at: $NICEGUI_PATH"
+
+# 2. Clean previous builds
 rm -rf build dist
 
-# 2. Build the App
-# Logic: We build 'gui.py' directly from the root.
-pyinstaller --noconfirm --onedir --windowed --clean \
-    --name "GarminAnalyzer" \
+# 3. Build the App
+echo "🔨 Running PyInstaller..."
+pyinstaller --noconfirm --onefile --windowed --clean \
+    --name "GarminAnalyzerPro" \
     --icon="runner.icns" \
-    --collect-all customtkinter \
-    --hidden-import="PIL" \
-    gui.py
+    --add-data "$NICEGUI_PATH:nicegui" \
+    --hidden-import="nicegui" \
+    --hidden-import="analyzer" \
+    --hidden-import="pandas" \
+    --hidden-import="plotly" \
+    --hidden-import="scipy" \
+    --hidden-import="sqlite3" \
+    app.py
 
-# 3. Create DMG Installer
-echo "💿 Packaging into .dmg..."
-hdiutil create dist/GarminAnalyzer.dmg -volname "GarminAnalyzer" -srcfolder dist/GarminAnalyzer.app -ov
-
-echo "✅ DONE! App is in dist/GarminAnalyzer.app"
-echo "✅ DMG is in dist/GarminAnalyzer.dmg"
+echo ""
+echo "✅ Build Complete!"
+echo "📂 Executable: dist/GarminAnalyzerPro"
+echo ""
+echo "To create a DMG installer, run:"
+echo "  hdiutil create dist/GarminAnalyzerPro.dmg -volname 'Garmin Analyzer Pro' -srcfolder dist/GarminAnalyzerPro.app -ov"

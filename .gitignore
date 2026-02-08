@@ -121,3 +121,19 @@ Desktop.ini
 *.swp
 *.swo
 *~
+
+# Development artifacts
+test_*.py
+TASK_*.md
+*_SUMMARY.md
+*_REPORT.md
+runner_stats.db
+*.html
+
+# PyInstaller build artifacts
+*.spec
+build/
+dist/
+
+# pytest
+.pytest_cache/

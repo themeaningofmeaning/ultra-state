@@ -1,12 +1,13 @@
-# Core dependencies
-fitparse>=1.2.0
-pandas>=1.5.0
-numpy>=1.23.0
-scipy>=1.10.0           # 🆕 REQUIRED for Peak Detection
-customtkinter>=5.0.0    # modern UI
-matplotlib>=3.7.0       # graphing
-plotly>=5.0.0           # advanced graphing
+# --- CORE LOGIC ---
+fitparse>=1.2.0         # Parsing .FIT files
+pandas>=1.5.0           # Data manipulation
+numpy>=1.23.0           # Math
+scipy>=1.10.0           # Peak detection & linear regression
 
-# For building executables (optional)
-pyinstaller>=5.0  # Windows
-py2app>=0.28      # macOS
+# --- THE NEW UI STACK ---
+nicegui>=1.4.0          # The "Silicon Valley" UI Framework
+plotly>=5.0.0           # Interactive Graphs (Native support in NiceGUI)
+pyperclip>=1.8.0        # Clipboard access for native mode
+
+# --- PACKAGING ---
+pyinstaller>=6.0.0      # To build the .app/.exe

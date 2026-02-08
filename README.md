@@ -1,45 +1,61 @@
-# Garmin FIT Analyzer 🏃‍♂️💨
+# Garmin Analyzer Pro 🏃‍♂️💨
 
-Garmin FIT Analyzer is a cross-platform desktop application for runners designed to unlock advanced running metrics hidden by standard platforms. It features a modern GUI for batch processing files and generating data specifically optimized for analysis by your LLM of choice (ChatGPT, Claude, Gemini, whatever).
+Garmin Analyzer Pro is a modern web-based desktop application for runners who want to unlock the advanced training metrics that Garmin Connect hides. Built with a sleek dark-mode interface, it transforms your .FIT files into actionable insights about aerobic efficiency, cardiac drift, and running form—all optimized for analysis by your LLM of choice (ChatGPT, Claude, Gemini, whatever).
 
-This project is built for serious runners who want deeper insights into efficiency and form.  It's not garbage data - if you feed this into your homerolled LLM running coach, it will help you adjust your form (cadence), avoid or heal from injuries, and maximize a weekly training plan based on your own body's every-changing capabilities (ex. x12 hill spints on Tue, rest Wed to lock in gains, 10 mile pace run Fri, etc.).  Like our training, this tool is a work in progress so contributions, suggestions, and positive vibes will help us all.
+This project is built for serious runners who want deeper insights into efficiency and durability. It's not garbage data - if you feed this into your homerolled LLM running coach, it will help you adjust your form (cadence), avoid or heal from injuries, and maximize a weekly training plan based on your own body's ever-changing capabilities (ex. x12 hill sprints on Tue, rest Wed to lock in gains, 10 mile pace run Fri, etc.). Like our training, this tool is a work in progress so contributions, suggestions, and positive vibes will help us all.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 
 ## ✨ Features
 
-- 📁 **Folder Selection** - Pick any folder containing `.fit` files
-- 📉 **Trend Analysis** - Visualizes Aerobic Decoupling and Form metrics over time.
-- 🏃 **Running Metrics**:
-  - **Grade Adjusted Pace (GAP):** Normalizes your effort on hills.
-  - **Aerobic Decoupling:** Measures cardiac drift / fatigue.
-  - Form Analysis (Ground Contact Time)
-  - Cadence & Power
-  - Elevation Gain
-  - **Efficiency Factor (EF):** Tracks your engine size (Speed ÷ Heart Rate).
-- 📋 **Copy to Clipboard** - One-click copy for pasting into Claude/GPT/Gemini
-- 📊 **CSV Export** - [optional] Export report as a CSV file for Excel/Sheets analysis.
-- 📋 **LLM Ready** - One-click copy for pasting a text report optimized for ChatGPT/Claude/Gemini.
-- 📦 **Standalone Executables** - No Python installation required for end users.
+- 🌐 **Modern Web UI** - Sleek dark-mode interface
+- � **Smart Import** - Drag-and-drop folder selection with automatic deduplication
+- 📊 **Interactive Charts** - Zoom, pan, and explore your training trends with Plotly
+- 🎯 **Performance Categorization** - Every run color-coded by quality:
+  - 🟢 **Race Ready** (Fast & Stable)
+  - 🟡 **Base Maintenance** (Slow & Stable)
+  - 🟠 **Expensive Speed** (Fast but Drifted)
+  - 🔴 **Struggling** (Slow & Drifted)
+- 🏃 **Advanced Metrics**:
+  - **Efficiency Factor (EF):** Your "gas mileage" (Speed ÷ Heart Rate)
+  - **Aerobic Decoupling (Cost):** Measures cardiac drift and durability
+  - **Heart Rate Recovery (HRR):** 1-minute post-run HR drop
+  - Cadence trends and form analysis
+  - Elevation gain tracking
+- � **Live Trend Analysis** - Zoom into any date range and see fitness trends recalculate in real-time
+- �️ **Activity Management** - View, filter, and delete runs with inline controls
+- � **LLM-Ready Export** - One-click copy optimized for ChatGPT/Claude/Gemini
+- 💾 **CSV Export** - Export filtered data for Excel/Sheets analysis
+- 📸 **Chart Export** - Save trend graphs as PNG images
 - 🔄 **Cross-Platform** - Works on Windows and macOS
+- 📦 **Standalone Executables** - No Python installation required
 
 ## 📸 Screenshots
 
-### The Run Report
+### Interactive Training Trends
 ![Dashboard View](assets/dashboard.png)
+*Zoom-responsive charts with live trend analysis and performance categorization*
 
-### Trend Analysis (aerobic decoupling, efficiency, & cadence)
+### Detailed Run Reports
 ![Graph View](assets/graph.png)
+*Professional cards with HR Recovery, Efficiency Factor, and Aerobic Decoupling*
 
-### 📈 How to Read the Graph
+### 📈 How to Read the Chart
 
-The trend graph uses a unique 4-color system to grade the **Quality** of every run:
+The trend chart uses a smart 4-color system to categorize the **Quality** of every run based on two key metrics: Efficiency Factor (your speed relative to heart rate) and Aerobic Decoupling (cardiac drift):
 
-- 🟢 **Green (High Quality):** High Efficiency + Low Decoupling. You were fast and stable. (Race Ready).
-- 🟡 **Yellow (Maintenance Quality for Base/Recovery):** Low Efficiency + Low Decoupling. A slow, easy aerobic maintenance run.
-- 🔴 **Red ("Expensive" Workout):** High Efficiency + High Decoupling. You ran fast, but your heart rate drifted significantly (>5%).
-- ⚫ **Dark (Slow & Struggling):** Low Efficiency + High Decoupling. You were slow *and* struggling. Rest needed.
+- � **Race Ready (Fast & Stable):** High EF + Low Decoupling (<5%). You were fast and your cardiovascular system stayed efficient. Peak performance.
+- 🟡 **Base Maintenance (Slow & Stable):** Low EF + Low Decoupling (<5%). A controlled easy run building aerobic base without fatigue.
+- � **Expensive Speed (Fast but Drifted):** High EF + High Decoupling (>5%). You ran fast, but your heart rate drifted significantly. Unsustainable effort.
+- 🔴 **Struggling (Slow & Drifted):** Low EF + High Decoupling (>5%). You were slow *and* your HR drifted. Sign of accumulated fatigue or poor conditions.
+
+**Interactive Features:**
+- Click legend items to toggle traces on/off
+- Drag to zoom into specific date ranges
+- Double-click to reset zoom
+- Hover over points for detailed run stats
+- Trend subtitle updates based on visible data
 
 ## 🚀 Installation
 
@@ -48,8 +64,8 @@ The trend graph uses a unique 4-color system to grade the **Quality** of every r
 Don't want to mess with Python code? No problem.
 
 1. **[Click here to go to the Releases page](https://github.com/themeaningofmeaning/garmin-fit-analyzer/releases).**
-2. 🍎**Mac Users:** Download `GarminAnalyzer.dmg`.
-3. 🪟**Windows Users:** Download `GarminAnalyzer.zip`, unzip it, and run the app inside.
+2. 🍎**Mac Users:** Download `GarminAnalyzerPro.dmg` or `GarminAnalyzerPro-macOS.zip`.
+3. 🪟**Windows Users:** Download `GarminAnalyzerPro-Windows.zip`, unzip it, and run the executable.
 
 ### Option 2: Run from Source (For Developers)
 
@@ -57,7 +73,7 @@ If you want to modify the code or contribute:
 
 ```bash
 # Clone the repository
-git clone [https://github.com/themeaningofmeaning/garmin-fit-analyzer.git](https://github.com/themeaningofmeaning/garmin-fit-analyzer.git)
+git clone https://github.com/themeaningofmeaning/garmin-fit-analyzer.git
 cd garmin-fit-analyzer
 
 # Create virtual environment (recommended)
@@ -69,45 +85,67 @@ source venv/bin/activate  # On macOS/Linux
 pip install -r requirements.txt
 
 # Run the application
-python gui.py
+python app.py
 ```
 
-## Building Executables
+The app will open in your default browser at `http://localhost:8080`.
+
+## 🔨 Building Executables
+
+Want to create standalone executables? We've got you covered.
 
 ### For macOS
-Run the build script to create a .dmg installer:
 ```bash
 ./build_mac.sh
-# Output: dist/GarminAnalyzer.dmg
+# Output: dist/GarminAnalyzerPro.app
 ```
 
 ### For Windows
-Run the batch file to build the application:
-```bash
+```cmd
 build_windows.bat
-# Output: dist/GarminAnalyzer
-# Note: You must manually zip this folder to share it.
+# Output: dist\GarminAnalyzerPro.exe
 ```
+
+See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for detailed build documentation and troubleshooting.
 
 ## 🔍 What the Metrics Mean
 
-| Metric | Description | Good Range |
-|--------|-------------|------------|
-| **GAP** | Grade Adjusted Pace - accounts for elevation | Lower = harder effort |
-| **Decoupling** | HR/Speed efficiency drift | < 5% = Excellent |
-| **Ground Contact Time** | Time foot stays on ground | 200-300ms typical |
-| **Cadence** | Steps per minute | 170-180 spm optimal |
+| Metric | Description | Good Range | Why It Matters |
+|--------|-------------|------------|----------------|
+| **Efficiency Factor (EF)** | Speed ÷ Heart Rate | Higher = Better | Your "gas mileage" - tracks aerobic engine development |
+| **Aerobic Decoupling (Cost)** | HR drift over time | < 5% = Excellent | Measures cardiovascular durability and fatigue resistance |
+| **HR Recovery (HRR)** | HR drop in 60 seconds | > 30 bpm = Excellent | Indicates aerobic fitness and recovery capacity |
+| **Cadence** | Steps per minute | 170-180 spm optimal | Higher cadence = better form efficiency |
+
+### 💡 Understanding Aerobic Decoupling
+
+Decoupling measures how much your heart rate rises to maintain the same pace over time (cardiac drift). It's calculated by comparing the first half vs. second half of your run:
+
+- **< 5%:** Excellent durability. Your aerobic system stayed efficient throughout.
+- **5-10%:** Moderate drift. Acceptable for tempo/threshold work.
+- **> 10%:** High fatigue. Either you ran too fast for your current fitness, or you're carrying accumulated fatigue from recent training.
+
+### 🫀 Why HR Recovery Matters
+
+HR Recovery (HRR) measures how fast your heart rate drops 60 seconds after you stop running. It's one of the best indicators of aerobic fitness and autonomic nervous system health.
+
+**Common Causes of Low HRR (<20 bpm):**
+1. **The Cooldown Effect** (Most Common): If you jog or walk before pressing stop, your HR is already low, so the drop will be small. For a true test, stop immediately after your hardest effort.
+2. **Dehydration & Heat**: Thicker blood keeps HR elevated.
+3. **Accumulated Fatigue**: Your body is struggling to recover from recent hard training.
 
 ## 💬 LLM Integration
 
-The output is designed to be easily copy-pasted into LLMs like Claude, ChatGPT, or Gemini for deeper analysis. Each run report includes:
+The app generates reports specifically optimized for LLM analysis. Each run includes:
 
-- **Stats**: Distance, pace, GAP
-- **Effort**: Moving/rest time, work/rest ratio
-- **Climb**: Elevation gain
-- **Metrics**: HR, cadence, power
-- **Engine**: HR decoupling percentage with interpretation
-- **Form**: Ground contact time change
+- **Performance Metrics**: Distance, pace, elevation
+- **Efficiency Data**: EF, aerobic decoupling, HR recovery
+- **Form Analysis**: Cadence trends
+- **Context**: Color-coded performance category
+
+### 🔒 LLM Safety Lock
+
+The app automatically disables the "Copy for LLM" button when you select large timeframes (All Time, This Year) to prevent overwhelming your LLM with too much data. Stick to Last 30/90 Days or Last Import for best results.
 
 ### 🧠 Pro Tip: Getting the most out of your Garmin data w/ this app
 
@@ -139,39 +177,52 @@ For the most powerful insights, combine these three data sources. This allows th
 ## 📂 Project Structure
 
 ```
-garmin-fit-analyzer/
-├── analyzer.py       # Core analysis logic (moved to root)
-├── gui.py            # Main application entry point (moved to root)
-├── assets/           # README screenshots
-├── build_mac.sh      # Mac build script
+garmin-analyzer-pro/
+├── app.py            # Main application
+├── analyzer.py       # Core FIT file analysis logic
+├── assets/           # Screenshots and images
+├── build_mac.sh      # macOS build script
 ├── build_windows.bat # Windows build script
-├── runner.icns       # App Icons
-├── requirements.txt  # Dependencies
+├── runner.icns       # macOS app icon
+├── runner.ico        # Windows app icon
+├── requirements.txt  # Python dependencies
+├── BUILD_INSTRUCTIONS.md  # Detailed build guide
+├── RELEASE_CHECKLIST.md   # Pre-release testing checklist
 └── README.md
 ```
 
 ## 🛠️ Built With
 
-* **[CustomTkinter](https://github.com/TomSchimansky/CustomTkinter)** - Modern, dark-mode UI library.
-* **[Matplotlib](https://matplotlib.org/)** - Graphing and data visualization.
-* **[FitParse](https://github.com/dtcooper/python-fitparse)** - Low-level FIT file parsing.
-* **[Pandas](https://pandas.pydata.org/)** & **[NumPy](https://numpy.org/)** - Data manipulation and vector math.
+* **[NiceGUI](https://nicegui.io/)** - Modern Python web UI framework with native desktop support
+* **[Plotly](https://plotly.com/)** - Interactive, publication-quality graphs
+* **[FitParse](https://github.com/dtcooper/python-fitparse)** - Low-level FIT file parsing
+* **[Pandas](https://pandas.pydata.org/)** & **[NumPy](https://numpy.org/)** - Data manipulation and analysis
+* **[SciPy](https://scipy.org/)** - Linear regression for trend analysis
+* **[PyInstaller](https://pyinstaller.org/)** - Standalone executable packaging
 
-## License
+## 📜 License
 
 MIT License - see LICENSE file for details.
 
-## Contributing
+## 🤝 Contributing
+
+Contributions are welcome! Here's how:
 
 1. Fork the repository
-2. Create a feature branch
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
-4. Submit a pull request
+4. Test thoroughly (see RELEASE_CHECKLIST.md)
+5. Submit a pull request
 
-## Acknowledgments
+## 🙏 Acknowledgments
 
-- Based on the Minetti (2002) energy cost equation for grade adjustments
-- Inspired by Strava's GAP methodology
+- Aerobic decoupling methodology inspired by endurance training science
+- Performance categorization based on Efficiency Factor research
+- Built with love for the running community
+
+## 📧 Contact
+
+Questions? Suggestions? Open an issue or reach out!
 
 ---
-*Built with love for 🏃‍♂️ and 🍵 by Dylan Goldfus*
+*Built with ❤️ for 🏃‍♂️ and ☕ by Dylan Goldfus*
