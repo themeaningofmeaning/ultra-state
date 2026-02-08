@@ -225,4 +225,4 @@ Contributions are welcome! Here's how:
 Questions? Suggestions? Open an issue or reach out!
 
 ---
-*Built with ❤️ for 🏃‍♂️ and ☕ by Dylan Goldfus*
+*Built with ❤️ for 🏃‍♂️ and 🍵 by Dylan Goldfus*
