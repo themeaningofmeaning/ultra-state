@@ -10,7 +10,7 @@ This project is built for serious runners who want deeper insights into efficien
 ## ✨ Features
 
 - 🌐 **Modern Web UI** - Sleek dark-mode interface
-- � **Smart Import** - Drag-and-drop folder selection with automatic deduplication
+- 📁➕  **Smart Import** - Drag-and-drop folder selection with automatic deduplication
 - 📊 **Interactive Charts** - Zoom, pan, and explore your training trends with Plotly
 - 🎯 **Performance Categorization** - Every run color-coded by quality:
   - 🟢 **Race Ready** (Fast & Stable)
@@ -23,9 +23,9 @@ This project is built for serious runners who want deeper insights into efficien
   - **Heart Rate Recovery (HRR):** 1-minute post-run HR drop
   - Cadence trends and form analysis
   - Elevation gain tracking
-- � **Live Trend Analysis** - Zoom into any date range and see fitness trends recalculate in real-time
-- �️ **Activity Management** - View, filter, and delete runs with inline controls
-- � **LLM-Ready Export** - One-click copy optimized for ChatGPT/Claude/Gemini
+- 📈 **Live Trend Analysis** - Zoom into any date range and see fitness trends recalculate in real-time
+- 🏃 **Activity Management** - View, filter, and delete runs with inline controls
+- 📋: **LLM-Ready Export** - One-click copy optimized for ChatGPT/Claude/Gemini
 - 💾 **CSV Export** - Export filtered data for Excel/Sheets analysis
 - 📸 **Chart Export** - Save trend graphs as PNG images
 - 🔄 **Cross-Platform** - Works on Windows and macOS
