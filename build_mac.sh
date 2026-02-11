@@ -22,6 +22,8 @@ pyinstaller --noconfirm --onefile --windowed --clean \
     --hidden-import="plotly" \
     --hidden-import="scipy" \
     --hidden-import="sqlite3" \
+    --hidden-import="PIL" \
+    --hidden-import="kaleido" \
     app.py
 
 echo ""

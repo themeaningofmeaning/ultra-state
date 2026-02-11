@@ -1,12 +1,12 @@
 """
 Garmin FIT File Analyzer - Core Analysis Engine
-Upgraded: Added HRR (Heart Rate Recovery) Analysis.
+Upgraded: Fixed 'NoneType' crash by sanitizing all inputs to 0 if missing.
 """
 
 import fitparse
 import pandas as pd
 import numpy as np
-from scipy.signal import find_peaks  # 🆕 For HRR detection
+from scipy.signal import find_peaks
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import os
@@ -31,6 +31,37 @@ class FitAnalyzer:
     def _emit(self, text: str):
         self.output_callback(text)
     
+    def get_training_label(self, aerobic, anaerobic):
+        """
+        Returns custom (Label, Color_Class) based on Training Effect.
+        Logic: MAX POWER, VO2 MAX, THRESHOLD, MAINTAINING, RECOVERY.
+        
+        Args:
+            aerobic: Aerobic training effect (0.0 - 5.0)
+            anaerobic: Anaerobic training effect (0.0 - 5.0)
+            
+        Returns:
+            Tuple of (label_text, color_classes)
+        """
+        aerobic = float(aerobic or 0)
+        anaerobic = float(anaerobic or 0)
+        
+        # 1. Anaerobic (High Intensity)
+        if anaerobic > 2.0:
+            return "MAX POWER", "text-purple-400 border-purple-500/30"
+        # 2. VO2 Max (Top End Aerobic)
+        elif aerobic >= 4.0:
+            return "VO2 MAX", "text-red-400 border-red-500/30"
+        # 3. Threshold (High Aerobic)
+        elif aerobic >= 3.5:
+            return "THRESHOLD", "text-orange-400 border-orange-500/30"
+        # 4. Base (Low Aerobic)
+        elif aerobic < 2.5:
+            return "RECOVERY", "text-emerald-400 border-emerald-500/30"
+        # 5. Moderate Aerobic (Zone 2-3)
+        else:
+            return "MAINTAINING", "text-blue-400 border-blue-500/30"
+    
     def analyze_file(self, filename: str) -> Optional[Dict[str, Any]]:
         try:
             fitfile = fitparse.FitFile(filename)
@@ -40,7 +71,72 @@ class FitAnalyzer:
 
         data = []
         start_time = None
+        
+        # --- NEW: Extract Session & Profile Metadata (Safe Mode) ---
+        session_max_speed = 0.0
+        session_ascent = 0
+        user_max_hr = 0
+        
+        # Initialize defaults for new metrics
+        session_metrics = {
+            'total_calories': 0,
+            'total_training_effect': 0.0,
+            'total_anaerobic_training_effect': 0.0,
+            'recovery_time': 0,
+            'avg_vertical_oscillation': 0.0,
+            'avg_stance_time': 0.0,
+            'avg_step_length': 0.0,
+            'avg_respiration_rate': 0.0,
+            'avg_temperature': 0
+        }
+        
+        # 1. Check Session Messages (Official Summary)
+        for msg in fitfile.get_messages("session"):
+            vals = msg.get_values()
+            # Basic Speed/Ascent/HR (Existing)
+            if 'enhanced_max_speed' in vals: 
+                session_max_speed = vals.get('enhanced_max_speed') or 0.0
+            elif 'max_speed' in vals: 
+                session_max_speed = vals.get('max_speed') or 0.0
+            
+            if 'total_ascent' in vals: 
+                session_ascent = vals.get('total_ascent') or 0
+            
+            if 'max_heart_rate' in vals: 
+                user_max_hr = vals.get('max_heart_rate') or 0
+            
+            # --- FIX: Explicitly extract Temperature & Calories from Summary ---
+            if 'avg_temperature' in vals:
+                session_metrics['avg_temperature'] = vals.get('avg_temperature') or 0
+            if 'total_calories' in vals:
+                session_metrics['total_calories'] = vals.get('total_calories') or 0
+            
+            # --- NEW: PHYSIO & METABOLIC ---
+            if 'total_training_effect' in vals:
+                session_metrics['total_training_effect'] = vals.get('total_training_effect') or 0.0
+            if 'total_anaerobic_training_effect' in vals:
+                session_metrics['total_anaerobic_training_effect'] = vals.get('total_anaerobic_training_effect') or 0.0
+            
+            # --- NEW: RUNNING DYNAMICS (Session Averages) ---
+            if 'avg_vertical_oscillation' in vals:
+                session_metrics['avg_vertical_oscillation'] = vals.get('avg_vertical_oscillation') or 0.0
+            if 'avg_stance_time' in vals:
+                session_metrics['avg_stance_time'] = vals.get('avg_stance_time') or 0.0
+            if 'avg_step_length' in vals:
+                session_metrics['avg_step_length'] = vals.get('avg_step_length') or 0.0
+            if 'avg_respiration_rate' in vals:
+                session_metrics['avg_respiration_rate'] = vals.get('avg_respiration_rate') or 0.0
 
+        # 2. Check User Profile (Static Setting - Preferred for HR Zones)
+        for msg in fitfile.get_messages("user_profile"):
+            vals = msg.get_values()
+            if 'max_heart_rate' in vals:
+                # Only override if we get a valid positive integer
+                profile_hr = vals.get('max_heart_rate') or 0
+                if profile_hr > 0:
+                    user_max_hr = profile_hr
+
+        # --- Parse Records (Time Series) ---
         for record in fitfile.get_messages("record"):
             r = record.get_values()
             if start_time is None and r.get('timestamp'):
@@ -76,9 +172,18 @@ class FitAnalyzer:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
         df['alt'] = df['alt'].interpolate(method='linear')
-        return self._compute_metrics(df, filename, start_time)
+        
+        # Pass the extracted session metadata to compute metrics
+        metadata = {
+            'session_max_speed': session_max_speed,
+            'session_ascent': session_ascent,
+            'user_max_hr': user_max_hr,
+            **session_metrics  # Merge in the new metrics
+        }
+        
+        return self._compute_metrics(df, filename, start_time, metadata)
     
-    def _compute_metrics(self, df: pd.DataFrame, filename: str, start_time) -> Dict[str, Any]:
+    def _compute_metrics(self, df: pd.DataFrame, filename: str, start_time, metadata: Dict) -> Dict[str, Any]:
         # --- 1. WORK/REST ---
         total_duration_sec = (df['timestamp'].iloc[-1] - df['timestamp'].iloc[0]).total_seconds()
         df_active = df[df['speed'] > 1.0].copy()
@@ -93,10 +198,14 @@ class FitAnalyzer:
         avg_gap_pace_str = "--:--"
         avg_gap_speed_m_min = 0
         
-        if 'alt' in df.columns and df['alt'].notnull().any():
+        # Use session ascent if available, else calculate from DF
+        if metadata['session_ascent'] and metadata['session_ascent'] > 0:
+            total_climb_ft = metadata['session_ascent'] * 3.28084
+        elif 'alt' in df.columns and df['alt'].notnull().any():
             df['alt_diff'] = df['alt'].diff()
             total_climb_ft = df[df['alt_diff'] > 0.2]['alt_diff'].sum() * 3.28084
             
+        if 'alt' in df.columns and df['alt'].notnull().any():
             df_active['dist_diff'] = df_active['dist'].diff()
             df_active['alt_diff'] = df_active['alt'].diff()
             window = 10
@@ -112,10 +221,25 @@ class FitAnalyzer:
                 avg_gap_pace_str = f"{int(gap_pace_min)}:{int((gap_pace_min % 1) * 60):02d}"
                 avg_gap_speed_m_min = avg_gap_speed * 60
 
-        # --- 3. HRR Analysis (New Feature) ---
-        hrr_list = self._calculate_hrr(df) # Returns list like [35, 32, 20]
+        # --- 3. MAX SPEED & HR LOGIC ---
+        # Speed: m/s -> mph
+        max_speed_mph = 0.0
+        if metadata['session_max_speed'] and metadata['session_max_speed'] > 0:
+            max_speed_mph = metadata['session_max_speed'] * 2.23694
+        elif df['speed'].max() > 0:
+            max_speed_mph = df['speed'].max() * 2.23694
 
-        # --- 4. DYNAMICS ---
+        # Max HR: User Profile > Session Max > Observed Max > Default (185)
+        max_hr = 185
+        if metadata['user_max_hr'] and metadata['user_max_hr'] > 0:
+            max_hr = metadata['user_max_hr']
+        elif df['hr'].max() > 0:
+            max_hr = df['hr'].max()
+            
+        # --- 4. HRR Analysis ---
+        hrr_list = self._calculate_hrr(df)
+
+        # --- 5. DYNAMICS ---
         v_ratio = 0
         if 'v_osc' in df_active.columns and 'stride_len' in df_active.columns:
             valid_dynamics = df_active[(df_active['v_osc'] > 0) & (df_active['stride_len'] > 0)]
@@ -124,7 +248,7 @@ class FitAnalyzer:
 
         gct_bal_val = df_active['gct_bal'].mean() if 'gct_bal' in df_active.columns else 0
 
-        # --- 5. ENGINE ---
+        # --- 6. ENGINE ---
         df_active['ef_metric'] = df_active['speed'] / df_active['hr']
         mid = len(df_active) // 2
         ef1, ef2 = df_active.iloc[:mid]['ef_metric'].mean(), df_active.iloc[mid:]['ef_metric'].mean()
@@ -137,8 +261,15 @@ class FitAnalyzer:
 
         gct_change = (df_active.iloc[mid:]['gct'].mean() - df_active.iloc[:mid]['gct'].mean()) if 'gct' in df_active.columns else 0
 
-        # --- 6. AVERAGES ---
-        avg_temp = df_active['temp'].mean() if 'temp' in df_active.columns else 0
+        # --- 7. AVERAGES ---
+        # Use session temperature if available, otherwise fall back to record-level average
+        avg_temp = metadata.get('avg_temperature', 0)
+        if not avg_temp or avg_temp == 0:
+            if 'temp' in df_active.columns:
+                temp_mean = df_active['temp'].mean()
+                avg_temp = temp_mean if pd.notna(temp_mean) else 0
+            else:
+                avg_temp = 0
         avg_resp = df_active['resp'].mean() if 'resp' in df_active.columns else 0
         avg_power = df_active['power'].mean() if 'power' in df_active.columns else 0
         avg_cadence = df_active['cadence'].mean() if 'cadence' in df_active.columns else 0
@@ -148,6 +279,12 @@ class FitAnalyzer:
 
         self._emit(f"Processing: {os.path.basename(filename)}... Done.")
         
+        # Get Training Label
+        te_label, te_color = self.get_training_label(
+            metadata.get('total_training_effect'), 
+            metadata.get('total_anaerobic_training_effect')
+        )
+        
         return {
             'filename': os.path.basename(filename),
             'date': start_time.strftime('%Y-%m-%d %H:%M'),
@@ -155,62 +292,57 @@ class FitAnalyzer:
             'pace': pace_str,
             'gap_pace': avg_gap_pace_str,
             'avg_hr': int(avg_hr) if not pd.isna(avg_hr) else 0,
+            'max_hr': int(max_hr),
             'avg_power': int(avg_power) if not pd.isna(avg_power) else 0,
             'avg_cadence': int(avg_cadence) if not pd.isna(avg_cadence) else 0,
             'efficiency_factor': round(efficiency_factor, 2),
             'decoupling': round(decoupling, 2),
-            'avg_temp': round(avg_temp, 1) if avg_temp else 0,
+            'avg_temp': round(avg_temp, 1) if (avg_temp and pd.notna(avg_temp) and avg_temp > 0) else 0,
             'avg_resp': round(avg_resp, 1) if avg_resp else 0,
-            'hrr_list': hrr_list,  # 🆕 The raw data for LLM
+            'hrr_list': hrr_list,
             'elevation_ft': int(total_climb_ft),
+            'max_speed_mph': round(max_speed_mph, 2),
             'moving_time_min': round(moving_time_min, 1),
             'rest_time_min': round(rest_time_min, 1),
             'gct_change': round(gct_change, 1),
             'v_ratio': round(v_ratio, 2),
-            'gct_balance': round(gct_bal_val, 1)
+            'gct_balance': round(gct_bal_val, 1),
+            # --- NEW FIELDS ---
+            'calories': int(metadata.get('total_calories', 0)),
+            'training_effect': round(metadata.get('total_training_effect', 0), 1),
+            'anaerobic_te': round(metadata.get('total_anaerobic_training_effect', 0), 1),
+            'te_label': te_label,
+            'te_label_color': te_color,
+            # Dynamics (Session averages)
+            'avg_vertical_oscillation': round(metadata.get('avg_vertical_oscillation', 0) / 10, 2) if metadata.get('avg_vertical_oscillation') else 0,  # Convert mm to cm
+            'avg_stance_time': int(metadata.get('avg_stance_time', 0)),
+            'avg_step_length': round(metadata.get('avg_step_length', 0) / 1000, 2) if metadata.get('avg_step_length') else 0,  # Convert mm to m
+            'avg_respiration_rate': int(metadata.get('avg_respiration_rate', 0)),
+            'recovery_time': int(metadata.get('recovery_time', 0))
         }
 
     def _calculate_hrr(self, df: pd.DataFrame) -> List[int]:
-        """
-        Calculates Heart Rate Recovery (HRR) at 60 seconds after peaks.
-        Logic: Find HR peaks (end of intervals) -> Check HR 60s later -> Delta.
-        """
         if 'hr' not in df.columns or df['hr'].isnull().all():
             return []
-
-        # Smooth HR to avoid noise peaks
         hr_smooth = df['hr'].rolling(window=10, center=True).mean().fillna(df['hr'])
-        
-        # Find peaks: At least 140bpm, separated by 3 mins (approx interval gap)
-        # Assuming 1 record = 1 second usually.
         peaks, _ = find_peaks(hr_smooth, height=140, distance=180)
-        
         hrr_values = []
         for p in peaks:
-            # Check 60s later (approx 60 records)
             if p + 60 < len(df):
                 peak_hr = df['hr'].iloc[p]
                 recovery_hr = df['hr'].iloc[p + 60]
-                
-                # Logic: Is this actually a recovery? 
-                # If they kept running hard, HR won't drop much.
-                # HRR is only valid if they stopped or jogged.
-                # Threshold: Drop must be > 10bpm to count as a "Recovery Attempt"
                 delta = peak_hr - recovery_hr
                 if delta > 10:
                     hrr_values.append(int(delta))
-        
         return hrr_values
 
     def analyze_folder(self, folder_path: str):
         files = sorted([f for f in os.listdir(folder_path) if f.endswith('.fit')])
         total_files = len(files)
         results = []
-        
         for i, f in enumerate(files):
             if self.progress_callback:
                 self.progress_callback(i + 1, total_files)
             res = self.analyze_file(os.path.join(folder_path, f))
             if res: results.append(res)
-            
         return results

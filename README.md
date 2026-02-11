@@ -10,7 +10,7 @@ This project is built for serious runners who want deeper insights into efficien
 ## ✨ Features
 
 - 🌐 **Modern Web UI** - Sleek dark-mode interface
-- 📁➕  **Smart Import** - Drag-and-drop folder selection with automatic deduplication
+- 📁➕ **Smart Import** - Drag-and-drop a folder with .fit files.  Don't worry, it won't add duplicates previously loaded.
 - 📊 **Interactive Charts** - Zoom, pan, and explore your training trends with Plotly
 - 🎯 **Performance Categorization** - Every run color-coded by quality:
   - 🟢 **Race Ready** (Fast & Stable)
@@ -18,18 +18,24 @@ This project is built for serious runners who want deeper insights into efficien
   - 🟠 **Expensive Speed** (Fast but Drifted)
   - 🔴 **Struggling** (Slow & Drifted)
 - 🏃 **Advanced Metrics**:
+  - **Training Load:** Gamified workout stress score with visual ring indicator
   - **Efficiency Factor (EF):** Your "gas mileage" (Speed ÷ Heart Rate)
   - **Aerobic Decoupling (Cost):** Measures cardiac drift and durability
   - **Heart Rate Recovery (HRR):** 1-minute post-run HR drop
-  - Cadence trends and form analysis
-  - Elevation gain tracking
+  - **Running Form Analysis:** Cadence trends with form status (Elite, Good, Overstriding, etc.)
+  - **Activity Breakdown:** Moving vs. idle time analysis for trail running strategy
+  - Elevation gain tracking with grade-adjusted pace (GAP)
 - 📈 **Live Trend Analysis** - Zoom into any date range and see fitness trends recalculate in real-time
 - 🏃 **Activity Management** - View, filter, and delete runs with inline controls
-- 📋: **LLM-Ready Export** - One-click copy optimized for ChatGPT/Claude/Gemini
+- 📋 **LLM-Ready Export** - One-click copy optimized for any LLM interface with comprehensive coaching context:
+  - Physiology metrics (HR zones, Training Effect, Power)
+  - Mechanics analysis (Cadence, Form status, Activity breakdown)
+  - Lap-by-lap splits with cadence tracking
+  - Weather context and terrain analysis
 - 💾 **CSV Export** - Export filtered data for Excel/Sheets analysis
-- 📸 **Chart Export** - Save trend graphs as PNG images
+- 📸 **Chart Export** - Export all trend charts as a single combined PNG image
 - 🔄 **Cross-Platform** - Works on Windows and macOS
-- 📦 **Standalone Executables** - No Python installation required
+- 📦 **Standalone Executables** - If you're not a developer, don't sweat it, executables are available in [releases](https://github.com/themeaningofmeaning/garmin-fit-analyzer/releases)
 
 ## 📸 Screenshots
 
@@ -112,10 +118,23 @@ See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for detailed build documentat
 
 | Metric | Description | Good Range | Why It Matters |
 |--------|-------------|------------|----------------|
+| **Training Load** | Recovery: <75<br>Maintenance: 75-150<br>Productive: 150-300<br>Overreaching: 300+ | Measures total workout stress - helps balance hard training with recovery |
 | **Efficiency Factor (EF)** | Speed ÷ Heart Rate | Higher = Better | Your "gas mileage" - tracks aerobic engine development |
 | **Aerobic Decoupling (Cost)** | HR drift over time | < 5% = Excellent | Measures cardiovascular durability and fatigue resistance |
 | **HR Recovery (HRR)** | HR drop in 60 seconds | > 30 bpm = Excellent | Indicates aerobic fitness and recovery capacity |
 | **Cadence** | Steps per minute | 170-180 spm optimal | Higher cadence = better form efficiency |
+
+### 💪 Understanding Training Load
+
+Training Load measures workout stress by analyzing components like duration and heart rate intensity. Higher intensity efforts are weighted exponentially, so a hard tempo run generates more load than an easy run of the same duration.
+
+**Load Categories:**
+- **🔵 Recovery (<75):** Easy effort that promotes adaptation and recovery
+- **🟢 Maintenance (75-150):** Steady training that maintains your current fitness level
+- **🟠 Productive (150-300):** Hard work that builds fitness and improves performance
+- **🔴 Overreaching (300+):** Very high stress that requires adequate recovery time
+
+**Training Tip:** Most of your runs should be Recovery or Maintenance, with Productive efforts 1-2x per week, and Overreaching reserved for key workouts or races.
 
 ### 💡 Understanding Aerobic Decoupling
 
@@ -195,9 +214,11 @@ garmin-analyzer-pro/
 
 * **[NiceGUI](https://nicegui.io/)** - Modern Python web UI framework with native desktop support
 * **[Plotly](https://plotly.com/)** - Interactive, publication-quality graphs
+* **[Kaleido](https://github.com/plotly/Kaleido)** - Static image export for Plotly charts
 * **[FitParse](https://github.com/dtcooper/python-fitparse)** - Low-level FIT file parsing
 * **[Pandas](https://pandas.pydata.org/)** & **[NumPy](https://numpy.org/)** - Data manipulation and analysis
 * **[SciPy](https://scipy.org/)** - Linear regression for trend analysis
+* **[Pillow](https://python-pillow.org/)** - Image processing for chart export
 * **[PyInstaller](https://pyinstaller.org/)** - Standalone executable packaging
 
 ## 📜 License

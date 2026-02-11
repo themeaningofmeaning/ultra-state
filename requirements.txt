@@ -7,6 +7,8 @@ scipy>=1.10.0           # Peak detection & linear regression
 # --- THE NEW UI STACK ---
 nicegui>=1.4.0          # The "Silicon Valley" UI Framework
 plotly>=5.0.0           # Interactive Graphs (Native support in NiceGUI)
+kaleido>=0.2.1          # Static image export for Plotly
+Pillow>=9.0.0           # Image processing for chart export
 pyperclip>=1.8.0        # Clipboard access for native mode
 
 # --- PACKAGING ---

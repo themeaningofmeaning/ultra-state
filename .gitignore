@@ -127,8 +127,13 @@ test_*.py
 TASK_*.md
 *_SUMMARY.md
 *_REPORT.md
+*_SUMMARY.txt
 runner_stats.db
 *.html
+.build-readme.txt
+
+# Kiro internal specs (development only)
+.kiro/specs/
 
 # PyInstaller build artifacts
 *.spec

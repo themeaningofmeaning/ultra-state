@@ -137,11 +137,19 @@ def calculate_file_hash(filepath):
 
 
 # --- HELPER: FORM ANALYSIS (Centralized Logic) ---
-# --- HELPER: FORM ANALYSIS (Centralized Logic) ---
-def analyze_form(cadence, gct=None, stride=None, bounce=None):
+def analyze_form(cadence, gct, stride, bounce):
     """
     Analyze running form and return verdict, color, icon, and prescription.
-    Used for single-point diagnosis (Tooltips, Run Summary).
+    Robustly handles mixed units (meters vs mm).
+    
+    Args:
+        cadence: Average cadence (steps per minute)
+        gct: Ground contact time (milliseconds)
+        stride: Average step length (meters or millimeters)
+        bounce: Vertical oscillation (meters, centimeters, or millimeters)
+    
+    Returns:
+        Dictionary with verdict, color, bg, icon, and prescription
     """
     # Default Result
     res = {
@@ -161,17 +169,17 @@ def analyze_form(cadence, gct=None, stride=None, bounce=None):
     except (ValueError, TypeError):
         return res
     
-    # If cadence is missing, we can't analyze
-    if cadence == 0:
+    # If any key metric is missing, we can't fully analyze
+    if cadence == 0 or stride == 0:
         return res
-
+    
     # 2. Normalize Units (Target: mm for both)
     # Stride: If small (< 10), assume meters. If large (> 10), assume mm.
-    if stride < 10: 
+    if stride < 10:
         stride_mm = stride * 1000
     else:
         stride_mm = stride
-
+    
     # Bounce: If small (< 1), assume meters. If moderate (< 20), assume cm. Else mm.
     if bounce < 1:
         bounce_mm = bounce * 1000
@@ -179,92 +187,71 @@ def analyze_form(cadence, gct=None, stride=None, bounce=None):
         bounce_mm = bounce * 10
     else:
         bounce_mm = bounce
-
+    
     # 3. Calculate Vertical Ratio (%)
+    # Ratio = (Bounce / Stride) * 100
     ratio = (bounce_mm / stride_mm) * 100 if stride_mm > 0 else 0
     
-    # --- DIAGNOSIS TREE (Simple & Robust) ---
-    
-    # Elite/Good
-    if cadence >= 170:
-        res.update({
-            'verdict': 'ELITE FORM',
-            'color': 'text-emerald-400',
-            'bg': 'border-emerald-500/30',
-            'icon': 'verified',
-            'prescription': 'Pro-level mechanics. Excellent turnover.'
-        })
-    elif cadence >= 160:
-        res.update({
-            'verdict': 'GOOD FORM',
-            'color': 'text-blue-400',
-            'bg': 'border-blue-500/30',
-            'icon': 'check_circle',
-            'prescription': 'Balanced mechanics. Solid turnover.'
-        })
-    # The "Structural" Zone (Hiking/Walking) - NEW
-    elif cadence < 130:
-        res.update({
-            'verdict': 'HIKING / REST',
-            'color': 'text-blue-400',
-            'bg': 'border-blue-500/30',
-            'icon': 'hiking',
-            'prescription': 'Power hiking or recovery interval.'
-        })
-    # The "Danger" Zone
-    elif cadence < 150:
+    # --- DIAGNOSIS TREE ---
+    if cadence < 155:
         res.update({
             'verdict': 'OVERSTRIDING',
             'color': 'text-red-400',
             'bg': 'border-red-500/30',
             'icon': 'warning',
-            'prescription': 'Cadence is low (<150). Focus on shorter, quicker steps.'
+            'prescription': 'Cadence is critically low (<155). Take shorter, quicker steps.'
         })
-    # The "Meh" Zone
-    else:
+    elif gct > 280:
+        res.update({
+            'verdict': 'HEAVY FEET',
+            'color': 'text-orange-400',
+            'bg': 'border-orange-500/30',
+            'icon': 'hourglass_bottom',
+            'prescription': 'Ground contact >280ms. You are sinking. Focus on fast release.'
+        })
+    elif ratio > 8.6:
+        # Vertical Ratio > 8.6% is generally considered inefficient
+        res.update({
+            'verdict': 'INEFFICIENT',
+            'color': 'text-orange-400',
+            'bg': 'border-orange-500/30',
+            'icon': 'trending_up',
+            'prescription': f'Vertical Ratio is high ({ratio:.1f}%). Lean forward (~6°) to convert bounce to speed.'
+        })
+    elif cadence < 160:
+        res.update({
+            'verdict': 'LOW CADENCE',
+            'color': 'text-yellow-400',
+            'bg': 'border-yellow-500/30',
+            'icon': 'speed',
+            'prescription': 'Turnover is slow (<160). Aim for 165+ to improve efficiency.'
+        })
+    elif gct > 265:
         res.update({
             'verdict': 'PLODDING',
             'color': 'text-yellow-400',
             'bg': 'border-yellow-500/30',
             'icon': 'do_not_step',
-            'prescription': 'Turnover is sluggish. Pick up your feet.'
+            'prescription': "Don't dwell on ground. Pull your foot up quickly after landing."
+        })
+    elif cadence >= 170 and gct < 255:
+        res.update({
+            'verdict': 'ELITE FORM',
+            'color': 'text-emerald-400',
+            'bg': 'border-emerald-500/30',
+            'icon': 'verified',
+            'prescription': 'Pro-level mechanics. Excellent turnover and energy return.'
+        })
+    else:
+        res.update({
+            'verdict': 'GOOD FORM',
+            'color': 'text-blue-400',
+            'bg': 'border-blue-500/30',
+            'icon': 'check_circle',
+            'prescription': 'Balanced mechanics. No major flaws.'
         })
     
     return res
-
-def classify_split(cadence, hr, max_hr, grade):
-    """
-    Classify a single split (mile/lap) into 3 Buckets based on the 'Ultra Trinity':
-    1. Terrain (Grade)
-    2. Metabolic Cost (HR)
-    3. Mechanics (Cadence)
-    
-    Returns: 'HIGH QUALITY', 'STRUCTURAL', or 'BROKEN'
-    """
-    # Safety defaults
-    cadence = cadence or 0
-    hr = hr or 0
-    max_hr = max_hr or 185
-    grade = grade or 0
-    
-    z2_limit = max_hr * 0.78  # Approx aerobic threshold
-    
-    # GATE 1: TERRAIN (The Climb)
-    # If steep (>8%) or very slow cadence (hiking), it's valid volume.
-    if grade > 8 or cadence < 130:
-        return 'STRUCTURAL'
-        
-    # GATE 2: METABOLIC (The Recovery)
-    # If HR is low, mechanics don't matter. It's recovery volume.
-    if hr > 0 and hr <= z2_limit:
-        return 'STRUCTURAL'
-        
-    # GATE 3: PERFORMANCE (The Work)
-    # Running on flat ground with elevated HR. Form MUST be good.
-    if cadence >= 160:
-        return 'HIGH QUALITY'  # Good mechanics
-    else:
-        return 'BROKEN'   # Mechanical failure (High HR + Low Cadence)
 
 
 # --- MAIN APPLICATION CLASS ---
@@ -279,9 +266,6 @@ class GarminAnalyzerApp:
         self.activities_data = []
         self.df = None
         self.import_in_progress = False
-
-        # Initialize the volume data container
-        self.weekly_volume_data = None
         
         # Build UI
         self.build_ui()
@@ -583,11 +567,18 @@ class GarminAnalyzerApp:
         }
 
         return zone_times
-    
-    def calculate_gap_for_laps(self, lap_data, elevation_stream, timestamps, cadence_stream=None, max_hr=185):
+    def calculate_gap_for_laps(self, lap_data, elevation_stream, timestamps, cadence_stream=None):
         """
-        Calculate GAP, Average Cadence, and QUALITY VERDICT for each lap.
-        UPDATED: Now classifies each split as High Quality / Structural / Broken.
+        Calculate grade-adjusted pace (GAP) and average cadence for each lap.
+
+        Args:
+            lap_data: List of lap dictionaries with metrics
+            elevation_stream: List of elevation values in meters
+            timestamps: List of timestamps corresponding to elevation values
+            cadence_stream: List of cadence values (optional)
+
+        Returns:
+            List of lap dictionaries with GAP and avg_cadence added
         """
         from analyzer import minetti_cost_of_running
 
@@ -598,72 +589,81 @@ class GarminAnalyzerApp:
             if not lap.get('start_time') or not lap.get('total_elapsed_time'):
                 enhanced_laps.append({
                     **lap,
-                    'gap_pace': '--:--', 'actual_pace': '--:--',
-                    'is_steep': False, 'avg_gradient': 0, 'avg_cadence': None,
-                    'split_verdict': 'STRUCTURAL' # Default
+                    'gap_pace': '--:--',
+                    'actual_pace': '--:--',
+                    'is_steep': False,
+                    'avg_gradient': 0,
+                    'avg_cadence': None
                 })
                 continue
             
-            # Calculate avg_speed if not available
+            # Calculate avg_speed if not available (distance / time)
             avg_speed = lap.get('avg_speed')
             if avg_speed is None or avg_speed == 0:
+                # Calculate from distance and time
                 distance = lap.get('distance', 0)
                 elapsed_time = lap.get('total_elapsed_time', 0)
                 if distance > 0 and elapsed_time > 0:
-                    avg_speed = distance / elapsed_time
+                    avg_speed = distance / elapsed_time  # meters per second
                 else:
                     avg_speed = 0
 
-            # Calculate average gradient & cadence for this lap
+            # Calculate average gradient for this lap
             lap_start = lap['start_time']
             lap_end = lap_start + pd.Timedelta(seconds=lap['total_elapsed_time'])
 
+            # Find elevation points within this lap using index slicing
             lap_elevations = []
             lap_cadences = []
 
             for i, ts in enumerate(timestamps):
-                if ts is None: continue
+                if ts is None:
+                    continue
                 if lap_start <= ts <= lap_end:
-                    # Elevation
+                    # Collect elevation data
                     if elevation_stream[i] is not None:
                         if i > 0 and elevation_stream[i-1] is not None:
                             elev_diff = elevation_stream[i] - elevation_stream[i-1]
-                            dist_diff = avg_speed 
+                            # Use calculated avg_speed
+                            dist_diff = avg_speed  # meters per second
+
                             if dist_diff is not None and dist_diff > 0:
                                 gradient = elev_diff / dist_diff
                                 lap_elevations.append(gradient)
-                    # Cadence
+                    
+                    # Collect cadence data
                     if cadence_stream and i < len(cadence_stream) and cadence_stream[i] is not None:
                         lap_cadences.append(cadence_stream[i])
 
-            # Averages
-            avg_gradient = sum(lap_elevations) / len(lap_elevations) if lap_elevations else 0
+            # Calculate average gradient for lap
+            if lap_elevations:
+                avg_gradient = sum(lap_elevations) / len(lap_elevations)
+            else:
+                avg_gradient = 0
             
-            # Double cadence (Garmin 1-foot to 2-foot)
+            # Calculate average cadence for lap (double it since Garmin stores one-foot cadence)
             if lap_cadences:
                 avg_lap_cadence = (sum(lap_cadences) / len(lap_cadences)) * 2
             else:
-                avg_lap_cadence = 0
+                avg_lap_cadence = None
 
-            # --- THE NEW CLASSIFICATION LOGIC ---
-            # We classify this specific mile/lap based on the same logic as the graph
-            lap_hr = lap.get('avg_hr', 0)
-            split_verdict = classify_split(avg_lap_cadence, lap_hr, max_hr, avg_gradient * 100)
-            # ------------------------------------
-
-            # Minetti / GAP Logic
+            # Apply Minetti formula to get cost multiplier
             flat_cost = 3.6
             terrain_cost = minetti_cost_of_running(avg_gradient)
             cost_multiplier = terrain_cost / flat_cost
 
+            # Calculate GAP
             if avg_speed and avg_speed > 0:
-                gap_speed = avg_speed * cost_multiplier
-                gap_pace_min = 26.8224 / gap_speed
+                gap_speed = avg_speed * cost_multiplier  # FIXED: Multiply to adjust speed for terrain
+                # Convert to pace (min/mile)
+                gap_pace_min = 26.8224 / gap_speed  # 26.8224 m/s = 1 mile/min
                 gap_pace_str = f"{int(gap_pace_min)}:{int((gap_pace_min % 1) * 60):02d}"
 
+                # Also calculate actual pace for comparison
                 actual_pace_min = 26.8224 / avg_speed
                 actual_pace_str = f"{int(actual_pace_min)}:{int((actual_pace_min % 1) * 60):02d}"
-                
+
+                # Determine if GAP is significantly different (>15 sec/mile)
                 pace_diff_seconds = abs(gap_pace_min - actual_pace_min) * 60
                 is_steep = pace_diff_seconds > 15
             else:
@@ -671,14 +671,14 @@ class GarminAnalyzerApp:
                 actual_pace_str = "--:--"
                 is_steep = False
 
+            # Add to enhanced lap data
             enhanced_laps.append({
                 **lap,
                 'gap_pace': gap_pace_str,
                 'actual_pace': actual_pace_str,
                 'is_steep': is_steep,
                 'avg_gradient': avg_gradient,
-                'avg_cadence': avg_lap_cadence,
-                'split_verdict': split_verdict # <--- STORED HERE
+                'avg_cadence': avg_lap_cadence
             })
 
         return enhanced_laps
@@ -1204,132 +1204,99 @@ class GarminAnalyzerApp:
     
     def create_lap_splits_table(self, lap_data):
         """
-        Create table displaying lap splits with GAP and QUALITY VERDICT.
-        UPDATED: Adds Units (spm, bpm) + "Guilty Metric" Highlighting.
+        Create table displaying lap splits with GAP.
+
+        Args:
+            lap_data: List of lap dictionaries with metrics and GAP
+
+        Returns:
+            NiceGUI table component
         """
         # Define columns
         columns = [
-            {'name': 'lap', 'label': '#', 'field': 'lap', 'align': 'center'},
-            {'name': 'distance', 'label': 'Dist', 'field': 'distance', 'align': 'left'},
-            {'name': 'quality', 'label': 'Quality', 'field': 'quality', 'align': 'left'},
-            {'name': 'pace', 'label': 'Pace', 'field': 'pace', 'align': 'left'},
-            {'name': 'cadence', 'label': 'Cad', 'field': 'cadence', 'align': 'center'},
+            {'name': 'lap', 'label': 'Lap #', 'field': 'lap', 'align': 'center'},
+            {'name': 'distance', 'label': 'Distance', 'field': 'distance', 'align': 'left'},
+            {'name': 'pace', 'label': 'Avg Pace', 'field': 'pace', 'align': 'left'},
+            {'name': 'cadence', 'label': 'Avg Cadence', 'field': 'cadence', 'align': 'center'},
             {'name': 'gap', 'label': 'GAP', 'field': 'gap', 'align': 'left'},
-            {'name': 'hr', 'label': 'HR', 'field': 'hr', 'align': 'center'},
-            {'name': 'elev', 'label': 'Elev', 'field': 'elev', 'align': 'left'}
+            {'name': 'hr', 'label': 'Avg HR', 'field': 'hr', 'align': 'center'},
+            {'name': 'elev', 'label': 'Elev Change', 'field': 'elev', 'align': 'left'}
         ]
 
         # Transform lap data into rows
         rows = []
         for lap in lap_data:
-            distance_mi = lap.get('distance', 0) * 0.000621371
+            distance_mi = lap.get('distance', 0) * 0.000621371  # meters to miles
             
-            # 1. Prepare Elevation Data
+            # Calculate net elevation change (ascent - descent)
             ascent = lap.get('total_ascent', 0) or 0
             descent = lap.get('total_descent', 0) or 0
-            elev_change_ft = (ascent - descent) * 3.28084
+            elev_change_m = ascent - descent
+            elev_change_ft = elev_change_m * 3.28084
             
-            if elev_change_ft > 0: elev_str = f"+{int(elev_change_ft)} ft"
-            else: elev_str = f"{int(elev_change_ft)} ft"
+            # Format with explicit sign
+            if elev_change_ft > 0:
+                elev_str = f"+{int(elev_change_ft)} ft"
+            elif elev_change_ft < 0:
+                elev_str = f"{int(elev_change_ft)} ft"  # Negative sign already included
+            else:
+                elev_str = "0 ft"
+            
+            # Determine color based on "Vert is Good" philosophy
+            if elev_change_ft > 10:
+                elev_color = 'uphill'  # Green (gains)
+            elif elev_change_ft < -10:
+                elev_color = 'downhill'  # Cyan (flow)
+            else:
+                elev_color = 'flat'  # Grey (neutral)
 
-            # 2. Prepare Formatted Strings with Units
-            cad_val = int(lap['avg_cadence']) if lap.get('avg_cadence') else 0
-            cad_str = f"{cad_val} spm" if cad_val > 0 else '--'
-            
-            hr_val = int(lap['avg_hr']) if lap.get('avg_hr') else 0
-            hr_str = f"{hr_val} bpm" if hr_val > 0 else '--'
-            
-            # 3. Determine "The Why" (Highlight Logic)
-            verdict = lap.get('split_verdict', 'STRUCTURAL')
-            
-            # Default styles (neutral grey)
-            cad_class = 'text-zinc-400'
-            elev_class = 'text-zinc-400'
-            
-            # Logic: Color the metric that determined the verdict
-            if verdict == 'HIGH QUALITY':
-                # Green Cadence = Good Mechanics
-                cad_class = 'text-emerald-400 font-bold'
-                
-            elif verdict == 'BROKEN':
-                # Red Cadence = Mechanics Failed
-                cad_class = 'text-red-400 font-bold'
-                
-            elif verdict == 'STRUCTURAL':
-                # Blue Elevation = It was steep (Grade > 8%)
-                # Blue Cadence = It was a hike/walk
-                dist_m = lap.get('distance', 0)
-                grade = (ascent / dist_m) * 100 if dist_m > 0 else 0
-                
-                if grade > 8:
-                    elev_class = 'text-blue-400 font-bold' # Highlight Vert
-                else:
-                    cad_class = 'text-blue-400 font-bold' # Highlight Hiking Cadence
-            
             rows.append({
                 'lap': lap.get('lap_number', 0),
-                'distance': f"{distance_mi:.2f}",
-                'quality': verdict,
-                'pace': f"{lap.get('actual_pace', '--:--')} /mi", # Added unit
-                'cadence': cad_str,
-                'cad_class': cad_class, # <--- Pass the color class
-                'gap': f"{lap.get('gap_pace', '--:--')} /mi", # Added unit
+                'distance': f"{distance_mi:.2f} mi",
+                'pace': lap.get('actual_pace', '--:--'),
+                'cadence': int(lap['avg_cadence']) if lap.get('avg_cadence') else '--',
+                'gap': lap.get('gap_pace', '--:--'),
                 'gap_highlight': lap.get('is_steep', False),
-                'hr': hr_str,
+                'hr': int(lap['avg_hr']) if lap.get('avg_hr') else '--',
                 'elev': elev_str,
-                'elev_class': elev_class # <--- Pass the color class
+                'elev_color': elev_color
             })
 
         # Create table
-        table = ui.table(columns=columns, rows=rows, row_key='lap').classes('w-full')
+        table = ui.table(
+            columns=columns,
+            rows=rows,
+            row_key='lap'
+        ).classes('w-full')
 
-        # SLOT: Quality (Dot + Text)
-        table.add_slot('body-cell-quality', '''
-            <q-td :props="props">
-                <div class="flex items-center gap-2">
-                    <div v-if="props.value === 'HIGH QUALITY'" class="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]"></div>
-                    <div v-if="props.value === 'STRUCTURAL'" class="w-2 h-2 rounded-full bg-blue-400"></div>
-                    <div v-if="props.value === 'BROKEN'" class="w-2 h-2 rounded-full bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.6)]"></div>
-                    
-                    <span class="text-xs font-bold tracking-wide"
-                        :class="{
-                            'text-emerald-400': props.value === 'HIGH QUALITY',
-                            'text-blue-400': props.value === 'STRUCTURAL',
-                            'text-red-400': props.value === 'BROKEN'
-                        }">
-                        {{ props.value === 'HIGH QUALITY' ? 'Quality' : props.value === 'STRUCTURAL' ? 'Base' : 'Broken' }}
-                    </span>
-                </div>
-            </q-td>
-        ''')
-
-        # SLOT: Cadence (Dynamic Highlight)
-        table.add_slot('body-cell-cadence', '''
-            <q-td :props="props">
-                <span :class="props.row.cad_class">{{ props.value }}</span>
-            </q-td>
-        ''')
-
-        # SLOT: Elevation (Dynamic Highlight)
-        table.add_slot('body-cell-elev', '''
-            <q-td :props="props">
-                <span :class="props.row.elev_class">{{ props.value }}</span>
-            </q-td>
-        ''')
-
-        # SLOT: GAP (Steep Highlight)
+        # Add custom slot for GAP column with conditional highlighting
         table.add_slot('body-cell-gap', '''
             <q-td :props="props">
-                <span :style="props.row.gap_highlight ? 'color: #10B981; font-weight: 600;' : 'color: inherit;'">
+                <span :style="props.row.gap_highlight ?
+                    'color: #10B981; font-weight: 600;' :
+                    'color: inherit;'">
+                    {{ props.value }}
+                </span>
+            </q-td>
+        ''')
+        
+        # Add custom slot for Elev column with "Vert is Good" color scheme
+        table.add_slot('body-cell-elev', '''
+            <q-td :props="props">
+                <span :style="
+                    props.row.elev_color === 'uphill' ? 'color: #10B981; font-weight: 500;' :
+                    props.row.elev_color === 'downhill' ? 'color: #22D3EE; font-weight: 500;' :
+                    'color: #52525b;'">
                     {{ props.value }}
                 </span>
             </q-td>
         ''')
 
+        # Apply dark theme styling
         table.props('flat bordered dense dark')
         table.classes('bg-zinc-900 text-gray-200')
-        return table
 
+        return table
     def create_decoupling_card(self, decoupling_data):
         """
         Create card displaying aerobic decoupling metrics.
@@ -1653,13 +1620,13 @@ class GarminAnalyzerApp:
     
     async def open_activity_detail_modal(self, activity_hash, from_feed=False):
         """
-        Open detailed view of an activity.
-        FINAL POLISH: 
-        - Badge moved to Metrics Row.
-        - Splits calculation now includes max_hr for accurate verdict.
-        - Uses 'Feed Style' header for everything.
+        Open modal dialog with detailed activity analysis.
+
+        Args:
+            activity_hash: SHA-256 hash identifying the activity
+            from_feed: Boolean indicating if modal was opened from Feed (vs Activities table)
         """
-        # Show loading dialog
+        # Show loading dialog first
         with ui.dialog() as loading_dialog:
             with ui.card().classes('bg-zinc-900 p-6').style('min-width: 300px; box-shadow: none;'):
                 with ui.column().classes('items-center gap-4'):
@@ -1671,102 +1638,80 @@ class GarminAnalyzerApp:
         detail_data = await self.get_activity_detail(activity_hash)
         loading_dialog.close()
 
-        if detail_data is None or detail_data.get('error'):
-            ui.notify('Error loading activity', type='negative')
+        # Handle errors
+        if detail_data is None:
+            ui.notify('Error loading activity details', type='negative')
+            return
+
+        if detail_data.get('error') == 'file_not_found':
+            ui.notify('FIT file not found. The original file may have been moved or deleted.', type='negative')
+            return
+
+        if detail_data.get('error') == 'parse_error':
+            ui.notify(f"Error parsing FIT file: {detail_data.get('message', 'Unknown error')}", type='negative')
             return
 
         # Calculate metrics
-        # 1. HR Zones
         hr_zones = self.calculate_hr_zones(detail_data['hr_stream'], detail_data['max_hr'])
-        
-        # 2. Lap Splits (Passing max_hr for the verdict logic)
         enhanced_laps = self.calculate_gap_for_laps(
             detail_data['lap_data'],
             detail_data['elevation_stream'],
             detail_data['timestamps'],
-            detail_data.get('cadence_stream'),
-            max_hr=detail_data.get('max_hr', 185) # <--- CRITICAL FIX FROM PART 2
+            detail_data.get('cadence_stream')
         )
         
-        # 3. Decoupling
-        decoupling = self.calculate_aerobic_decoupling(detail_data['hr_stream'], detail_data['speed_stream'])
+        decoupling = self.calculate_aerobic_decoupling(
+            detail_data['hr_stream'],
+            detail_data['speed_stream']
+        )
         
-        # 4. Run/Walk
+        # Calculate strategy metrics
         run_walk_stats = None
         if detail_data.get('cadence_stream'):
             run_walk_stats = self.calculate_run_walk_stats(
-                detail_data['cadence_stream'], detail_data['speed_stream'], detail_data['hr_stream']
+                detail_data['cadence_stream'],
+                detail_data['speed_stream'],
+                detail_data['hr_stream']
             )
         
-        # 5. Terrain
         terrain_stats = self.calculate_terrain_stats(
-            detail_data['elevation_stream'], detail_data['hr_stream'], 
-            detail_data['speed_stream'], detail_data['timestamps']
+            detail_data['elevation_stream'],
+            detail_data['hr_stream'],
+            detail_data['speed_stream'],
+            detail_data['timestamps']
         )
-
-        activity = detail_data['activity_metadata']
-
-        # --- QUALITY BADGE CALCULATION ---
-        try:
-            cad = activity.get('avg_cadence', 0)
-            session = detail_data.get('session_data', {})
-            
-            form_res = analyze_form(
-                cad or session.get('avg_cadence', 0),
-                session.get('avg_stance_time', 0),
-                session.get('avg_step_length', 0),
-                session.get('avg_vertical_oscillation', 0)
-            )
-            
-            verdict_text = form_res['verdict']
-            
-            # UPDATED: Full text, no brackets
-            if verdict_text in ['ELITE FORM', 'GOOD FORM']:
-                v_label = 'HIGH QUALITY MILES' 
-                v_color = 'text-emerald-400'
-                v_bg = 'bg-emerald-500/20 border-emerald-500/30'
-            elif verdict_text in ['HIKING / REST', 'HIKING']:
-                 v_label = 'STRUCTURAL MILES'
-                 v_color = 'text-blue-400'
-                 v_bg = 'bg-blue-500/20 border-blue-500/30'
-            elif verdict_text in ['PLODDING', 'LOW CADENCE', 'OVERSTRIDING', 'HEAVY FEET']:
-                v_label = 'BROKEN MILES'
-                v_color = 'text-red-400'
-                v_bg = 'bg-red-500/20 border-red-500/30'
-            else:
-                v_label = None
-                
-        except:
-            v_label = None
-        # -------------------------------
 
         # Create main modal
         with ui.dialog() as detail_dialog:
             with ui.card().classes('w-full max-w-[900px] p-0 bg-zinc-950 h-full border border-zinc-800'):
-                # Close button
+                # Close button in top-right corner
                 with ui.row().classes('w-full justify-end p-2'):
                     close_btn = ui.button(icon='close', on_click=detail_dialog.close, color=None).props('flat round dense')
-                    close_btn.style('color: #9ca3af !important;')
+                    close_btn.style('color: #9ca3af !important; transition: color 0.2s ease;')
+                    close_btn.on('mouseenter', lambda: close_btn.style('color: #ffffff !important; transition: color 0.2s ease;'))
+                    close_btn.on('mouseleave', lambda: close_btn.style('color: #9ca3af !important; transition: color 0.2s ease;'))
 
-                # Content container
+                # Content container with padding
                 with ui.column().classes('w-full gap-4 px-4 pb-4'):
 
-                    # --- HEADER (Polished Layout) ---
-                    with ui.column().classes('w-full px-4 gap-1'):
-                        # Row 1: Date & Time (Clean Title)
-                        date_str = activity.get('date', '')
-                        try:
-                            from datetime import datetime
-                            dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
-                            formatted_date = dt.strftime('%A, %B %-d • %-I:%M %p')
-                        except:
-                            formatted_date = date_str
-                        
-                        ui.label(formatted_date).classes('text-2xl font-bold text-white tracking-tight')
-
-                        # Row 2: Metrics + Badge (The "Story")
-                        with ui.row().classes('items-center gap-3'):
-                            # The Big Numbers
+                    # Show different header based on source
+                    activity = detail_data['activity_metadata']
+                    
+                    if from_feed:
+                        # Context Bar (clean structural header) - user already saw the card in Feed
+                        with ui.row().classes('w-full justify-between items-center px-4'):
+                            # Left: Date & Title (bigger, tighter)
+                            date_str = activity.get('date', '')
+                            try:
+                                from datetime import datetime
+                                dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+                                formatted_date = dt.strftime('%A, %B %-d • %-I:%M %p')
+                            except:
+                                formatted_date = date_str
+                            
+                            ui.label(formatted_date).classes('text-2xl font-bold text-white tracking-tight')
+                            
+                            # Right: Big 4 Metrics (subtle, monospace) - added calories
                             distance = activity.get('distance_mi', 0)
                             elevation = activity.get('elevation_ft', 0)
                             pace = activity.get('pace', '--:--')
@@ -1777,60 +1722,334 @@ class GarminAnalyzerApp:
                                 metrics_str += f" • {calories} cal"
                             
                             ui.label(metrics_str).classes('text-zinc-400 font-mono text-sm tracking-wide')
+                        
+                        # Structural divider (full width for clean separation)
+                        ui.separator().classes('bg-zinc-800 my-4')
+                    else:
+                        # Full Activity Summary Card (for Activities table context)
+                        self.create_activity_summary_card_for_modal(activity, detail_data.get('max_hr_fallback', False))
 
-                            # The Badge (Injecting Context)
-                            if v_label:
-                                ui.label(v_label).classes(f'text-[10px] font-bold px-2 py-0.5 rounded border {v_color} {v_bg} tracking-wider')
-
-                    # Structural divider
-                    ui.separator().classes('bg-zinc-800 my-4')
-
-                    # 1. Strategy Row
+                    # 2. Strategy Row (Run/Walk & Terrain) - now the hero element when from_feed=True
                     self.create_strategy_row(run_walk_stats, terrain_stats)
 
-                    # 2. HR Zones Chart
+                    # 3. HR Zones Chart
                     with ui.card().classes('w-full bg-zinc-900 p-4 border border-zinc-800').style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
                         if detail_data.get('max_hr_fallback'):
                             ui.label('⚠️ Zones based on Session Max HR').classes('text-xs text-yellow-500 mb-2')
+
                         hr_chart = self.create_hr_zone_chart(hr_zones)
                         ui.plotly(hr_chart).classes('w-full')
 
-                    # 3. Body Response Row
+                    # 4. Body Response Row (Running Mechanics + Decoupling + Physiology)
                     session_data = detail_data.get('session_data', {})
+                    # Add cadence from activity metadata to session_data for mechanics card
                     if not session_data.get('avg_cadence'):
                         session_data['avg_cadence'] = activity.get('avg_cadence', 0)
                     
-                    has_dynamics = session_data and any([session_data.get('avg_vertical_oscillation'), session_data.get('avg_stance_time')])
+                    has_dynamics = session_data and any([
+                        session_data.get('avg_vertical_oscillation'),
+                        session_data.get('avg_stance_time'),
+                        session_data.get('avg_step_length')
+                    ])
                     
                     with ui.row().classes('w-full gap-3'):
+                        # Left: Running Mechanics
                         if has_dynamics:
                             with ui.column().classes('flex-1 min-w-0'):
                                 self.create_running_dynamics_card(session_data)
+                        
+                        # Middle: Aerobic Decoupling
                         with ui.column().classes('flex-1 min-w-0'):
                             self.create_decoupling_card(decoupling)
+                        
+                        # Right: Physiology
                         if session_data:
                             with ui.column().classes('flex-1 min-w-0'):
                                 self.create_physiology_card(session_data, activity)
 
-                    # 4. Cadence-Elevation Chart
+                    # 4.5. Cadence-Elevation Chart
                     if detail_data.get('cadence_stream') and detail_data.get('distance_stream'):
                         with ui.card().classes('w-full bg-zinc-900 p-4 border border-zinc-800').style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
                             cadence_chart = self.create_cadence_elevation_chart(
-                                detail_data['distance_stream'], detail_data['cadence_stream'], detail_data['elevation_stream'], use_miles=True
+                                detail_data['distance_stream'],
+                                detail_data['cadence_stream'],
+                                detail_data['elevation_stream'],
+                                use_miles=True
                             )
                             ui.plotly(cadence_chart).classes('w-full')
 
-                    # 5. Lap Splits
+                    # 5. Lap Splits Table
                     with ui.card().classes('w-full bg-zinc-900 p-4 border border-zinc-800').style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
+                        # Header with Copy icon
                         with ui.row().classes('w-full justify-between items-center mb-2'):
                             ui.label('Lap Splits').classes('text-lg font-bold text-white')
+                            # Copy Splits icon (matches Activities table eye icon style)
                             copy_icon = ui.icon('content_copy').classes('cursor-pointer text-zinc-500 hover:text-white transition-colors duration-200 text-sm')
                             copy_icon.on('click.stop', lambda: self.copy_splits_to_clipboard(enhanced_laps))
+                            copy_icon.tooltip('Copy table data (CSV)')
                         self.create_lap_splits_table(enhanced_laps)
 
         detail_dialog.open()
+    def create_activity_summary_card_for_modal(self, activity, max_hr_fallback=False):
+        """
+        Create activity summary card for modal (matches feed card styling exactly).
 
- 
+        Args:
+            activity: Activity dictionary with metrics
+            max_hr_fallback: Whether max HR was calculated from session data
+        """
+        d = activity
+
+        # Calculate long run threshold for classification
+        if self.df is not None and len(self.df) >= 5:
+            long_run_threshold = self.df['distance_mi'].quantile(0.8)
+        else:
+            long_run_threshold = 10.0
+
+        # Parse date string
+        date_str = d.get('date', '')
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+            formatted_date = dt.strftime('%a, %b %-d')
+            formatted_time = dt.strftime('%-I:%M %p')
+        except:
+            formatted_date = date_str
+            formatted_time = ''
+
+        # Classify run type
+        run_type_tag = self.classify_run_type(d, long_run_threshold)
+
+        # Calculate strain score
+        moving_time_min = d.get('moving_time_min', 0)
+        avg_hr = d.get('avg_hr', 0)
+        max_hr = d.get('max_hr', 185)
+
+        intensity = avg_hr / max_hr if max_hr > 0 else 0
+
+        if intensity < 0.65:
+            factor = 1.0
+        elif intensity < 0.75:
+            factor = 1.5
+        elif intensity < 0.85:
+            factor = 3.0
+        elif intensity < 0.92:
+            factor = 6.0
+        else:
+            factor = 10.0
+
+        strain = int(moving_time_min * factor)
+
+        if strain < 75:
+            strain_label = "Recovery"
+            strain_color = "blue"
+            strain_text_color = "#60a5fa"
+        elif strain < 150:
+            strain_label = "Maintenance"
+            strain_color = "#10B981"
+            strain_text_color = "#10B981"
+        elif strain < 300:
+            strain_label = "Productive"
+            strain_color = "orange"
+            strain_text_color = "orange"
+        else:
+            strain_label = "Overreaching"
+            strain_color = "red"
+            strain_text_color = "red"
+
+        # Determine cost for border color
+        cost = d.get('decoupling', 0)
+
+        # Create the card
+        card = ui.card().classes('w-full bg-zinc-900 p-3 border border-zinc-800 text-white')
+        card.style('box-shadow: none;')
+
+        with card:
+            with ui.column().classes('w-full gap-1'):
+                # --- ROW 1: Header & Calories ---
+                with ui.row().classes('w-full justify-between items-start'):
+                    # LEFT: Title & Time
+                    with ui.column().classes('gap-0'):
+                        ui.label(formatted_date).classes('font-bold text-zinc-200 text-sm')
+                        ui.label(formatted_time).classes('text-xs text-zinc-500')
+                    
+                    # RIGHT: Calories (in stats grid style)
+                    if d.get('calories'):
+                        with ui.row().classes('items-center gap-3 text-xs text-zinc-300 bg-zinc-800/50 px-2 py-1 rounded border border-zinc-700/50'):
+                            with ui.row().classes('items-center gap-1'):
+                                ui.icon('local_fire_department').classes('text-xs text-orange-400')
+                                ui.label(f"{d['calories']} cal")
+                
+                # --- ROW 2: Context Tags (Left Aligned) ---
+                with ui.row().classes('w-full items-center gap-2 mt-2'):
+                    # 1. Terrain Tag (Our "Hilly" Logic)
+                    for tag in run_type_tag.split(' | '):
+                        ui.label(tag).classes('text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 tracking-wide')
+                    
+                    # 2. Physio Tag (Garmin's Training Effect) - Wrapped in tag container
+                    if d.get('te_label'):
+                        te_color = d.get('te_label_color', 'text-zinc-400')
+                        # Extract just the color class for text
+                        if 'text-purple-400' in te_color:
+                            bg_color = 'bg-purple-500/10'
+                            border_color = 'border-purple-500/30'
+                        elif 'text-red-400' in te_color:
+                            bg_color = 'bg-red-500/10'
+                            border_color = 'border-red-500/30'
+                        elif 'text-orange-400' in te_color:
+                            bg_color = 'bg-orange-500/10'
+                            border_color = 'border-orange-500/30'
+                        elif 'text-emerald-400' in te_color:
+                            bg_color = 'bg-emerald-500/10'
+                            border_color = 'border-emerald-500/30'
+                        elif 'text-blue-400' in te_color:
+                            bg_color = 'bg-blue-500/10'
+                            border_color = 'border-blue-500/30'
+                        else:
+                            bg_color = 'bg-zinc-800'
+                            border_color = 'border-zinc-700'
+                        
+                        # Extract text color
+                        text_color = te_color.split()[0] if ' ' in te_color else te_color
+                        
+                        ui.label(d['te_label']).classes(f"text-[10px] font-bold px-2 py-0.5 rounded {bg_color} border {border_color} {text_color} tracking-wide")
+                
+                # --- ROW 3: Main Content - Metrics Grid + Strain Ring ---
+                with ui.row().classes('w-full gap-4 mb-1 items-center mt-3'):
+                    # Left: Primary Metrics Grid (flex-grow to take available space)
+                    with ui.column().classes('flex-1'):
+                        with ui.grid(columns=5).classes('w-full gap-3'):
+                            # Distance (with icon)
+                            with ui.column().classes('gap-0').style('line-height: 1.1;'):
+                                with ui.row().classes('items-center gap-1'):
+                                    ui.icon('straighten').classes('text-blue-400 text-xs')
+                                    ui.label('DISTANCE').classes('text-[10px] text-gray-500 font-bold tracking-wider')
+                                ui.label(f"{d.get('distance_mi', 0):.1f} mi").classes('text-lg font-bold').style('line-height: 1;')
+                            
+                            # Elevation (with icon)
+                            with ui.column().classes('gap-0').style('line-height: 1.1;'):
+                                with ui.row().classes('items-center gap-1'):
+                                    ui.icon('terrain').classes('text-green-400 text-xs')
+                                    ui.label('ELEVATION').classes('text-[10px] text-gray-500 font-bold tracking-wider')
+                                ui.label(f"{d.get('elevation_ft', 0)} ft").classes('text-lg font-bold').style('line-height: 1;')
+                            
+                            # Pace (with icon)
+                            with ui.column().classes('gap-0').style('line-height: 1.1;'):
+                                with ui.row().classes('items-center gap-1'):
+                                    ui.icon('speed').classes('text-purple-400 text-xs')
+                                    ui.label('PACE').classes('text-[10px] text-gray-500 font-bold tracking-wider')
+                                ui.label(d.get('pace', '--')).classes('text-lg font-bold').style('line-height: 1;')
+                                
+                            # Efficiency (with info icon)
+                            with ui.column().classes('gap-0').style('line-height: 1.1;'):
+                                with ui.row().classes('items-center gap-1'):
+                                    ui.label('EFFICIENCY').classes('text-[10px] text-gray-500 font-bold tracking-wider')
+                                    ui.icon('help_outline').classes('text-zinc-600 hover:text-white text-[10px] cursor-pointer').on('click.stop', lambda: self.show_ef_info())
+                                ui.label(f"{d.get('efficiency_factor', 0):.2f}").classes('text-lg font-bold').style('color: #10B981; line-height: 1;')
+                                
+                            # Decoupling (with info icon)
+                            with ui.column().classes('gap-0').style('line-height: 1.1;'):
+                                with ui.row().classes('items-center gap-1'):
+                                    ui.label('DECOUPLING').classes('text-[10px] text-gray-500 font-bold tracking-wider')
+                                    ui.icon('help_outline').classes('text-zinc-600 hover:text-white text-[10px] cursor-pointer').on('click.stop', lambda: self.show_cost_info())
+                                cost_color = '#10B981' if cost <= 5 else '#ff4d4d'
+                                ui.label(f"{cost:.1f}%").classes('text-lg font-bold').style(f'color: {cost_color}; line-height: 1;')
+                    
+                    # Vertical Divider (subtle, darker gray)
+                    ui.element('div').classes('h-full').style('width: 1px; background-color: #27272a; margin: 0 8px;')
+                    
+                    # Right: Strain Score Ring
+                    with ui.column().classes('items-center justify-center gap-1 mr-2'):
+                        # Circular progress ring with strain value
+                        with ui.element('div').classes('relative'):
+                            ui.circular_progress(value=min(strain/500, 1.0), size='80px', color=strain_color, show_value=False)
+                            # Center text (strain score)
+                            with ui.element('div').classes('absolute inset-0 flex items-center justify-center'):
+                                ui.label(str(strain)).classes('text-xl font-bold')
+                        
+                        # Label row with info icon (emphasize the insight)
+                        with ui.row().classes('items-center gap-1'):
+                            ui.icon('help_outline').classes('text-zinc-600 hover:text-white text-[10px] cursor-pointer').on('click.stop', lambda: self.show_load_info())
+                            ui.label('LOAD:').classes('text-xs text-zinc-300 font-bold uppercase tracking-widest')
+                            ui.label(strain_label).classes('text-sm font-bold').style(f'color: {strain_text_color};')
+                
+                # --- ROW 4: Footer - Peak Stats + Form Verdict ---
+                ui.separator().classes('my-1').style('background-color: #52525b; height: 1px;')
+                with ui.row().classes('w-full justify-between items-center'):
+                    # Left: Peak Stats with Icons and Labels
+                    with ui.row().classes('gap-6'):
+                        # Max HR
+                        with ui.column().classes('items-center gap-0'):
+                            ui.label('MAX HR').classes('text-[9px] text-gray-500 font-bold tracking-wider mb-0.5')
+                            with ui.row().classes('items-center gap-1'):
+                                ui.icon('monitor_heart').classes('text-red-400 text-sm')
+                                ui.label(f"{d.get('max_hr', 0)}").classes('text-sm font-bold text-white')
+                        
+                        # Avg HR (moved next to Max HR)
+                        with ui.column().classes('items-center gap-0'):
+                            ui.label('AVG HR').classes('text-[9px] text-gray-500 font-bold tracking-wider mb-0.5')
+                            with ui.row().classes('items-center gap-1'):
+                                ui.icon('favorite').classes('text-pink-400 text-sm')
+                                ui.label(f"{d.get('avg_hr', 0)}").classes('text-sm font-bold text-white')
+                        
+                        # Max Speed
+                        with ui.column().classes('items-center gap-0'):
+                            ui.label('MAX SPEED').classes('text-[9px] text-gray-500 font-bold tracking-wider mb-0.5')
+                            with ui.row().classes('items-center gap-1'):
+                                ui.icon('bolt').classes('text-yellow-400 text-sm')
+                                ui.label(f"{d.get('max_speed_mph', 0):.1f}").classes('text-sm font-bold text-white')
+                        
+                        # Cadence
+                        with ui.column().classes('items-center gap-0'):
+                            ui.label('CADENCE').classes('text-[9px] text-gray-500 font-bold tracking-wider mb-0.5')
+                            with ui.row().classes('items-center gap-1'):
+                                ui.icon('directions_run').classes('text-blue-400 text-sm')
+                                ui.label(f"{d.get('avg_cadence', 0)}").classes('text-sm font-bold text-white')
+                    
+                    # Right: Form Status Indicator
+                    form = analyze_form(
+                        d.get('avg_cadence'),
+                        d.get('avg_stance_time'),
+                        d.get('avg_step_length'),
+                        d.get('avg_vertical_oscillation')
+                    )
+                    if form['verdict'] != 'ANALYZING':
+                        # Determine background and border colors based on verdict (10% opacity tint)
+                        if form['verdict'] in ['ELITE FORM', 'GOOD FORM']:
+                            pill_bg = 'bg-emerald-500/10'
+                            pill_border = 'border-emerald-700/30'
+                            pill_text = 'text-emerald-400'
+                        elif form['verdict'] in ['OVERSTRIDING', 'HEAVY FEET', 'INEFFICIENT']:
+                            pill_bg = 'bg-amber-500/10'
+                            pill_border = 'border-amber-700/30'
+                            pill_text = 'text-amber-400'
+                        elif form['verdict'] in ['LOW CADENCE', 'PLODDING']:
+                            pill_bg = 'bg-red-500/10'
+                            pill_border = 'border-red-700/30'
+                            pill_text = 'text-red-400'
+                        else:
+                            pill_bg = 'bg-slate-500/10'
+                            pill_border = 'border-slate-700/30'
+                            pill_text = 'text-slate-400'
+                        
+                        # Convert verdict to title case
+                        verdict_display = form['verdict'].title()
+                        
+                        with ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {pill_bg} {pill_border}'):
+                            ui.label('🦶').classes('text-sm')
+                            ui.label('Form:').classes(f'text-xs font-bold {pill_text}')
+                            ui.label(verdict_display).classes(f'text-xs font-bold {pill_text}')
+
+
+
+
+
+
+
+
+
+
+        
     def build_ui(self):
         """Construct the complete UI layout with fixed sidebar."""
         # 1. CSS HACK: Hide Plotly Logo and notifications globally
@@ -2360,10 +2579,9 @@ root.destroy()
                 self.status_label.text = f'Imported {new_count} new'
                 self.status_label.style('color: #10B981;')
                 
-                # ADDED: Optional - Switch to "All Time" so you see EVERYTHING including new files
-                if self.current_timeframe == 'Last Import':
-                     self.current_timeframe = 'Last 30 Days'
-                     self.timeframe_select.value = 'Last 30 Days'
+                # Switch to "Last Import" timeframe
+                self.current_timeframe = 'Last Import'
+                self.timeframe_select.value = 'Last Import'
                 
                 # Show success notification
                 ui.notify(f'Import complete: {new_count} new activities', type='positive')
@@ -2478,14 +2696,8 @@ root.destroy()
                 
                 # 4. Create the "Hot Card" - entire card is clickable with hover effects
                 activity_hash = d.get('db_hash')
-                card = ui.card().classes(
-                    'w-full p-4 bg-zinc-900 border border-zinc-800 '
-                    'cursor-pointer relative overflow-hidden group '
-                    'transform transition-all duration-300 ease-out '
-                    'shadow-lg rounded-xl ' 
-                    'hover:border-zinc-500 hover:shadow-[0_20px_50px_rgba(0,0,0,0.9)] hover:-translate-y-1 hover:bg-zinc-800'
-                )
-                card.style('border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);')
+                card = ui.card().classes('w-full p-3 bg-zinc-900 border border-zinc-800 hover:border-zinc-600 hover:shadow-lg transition-all duration-200 cursor-pointer')
+                card.style('box-shadow: none;')
                 
                 # Make entire card clickable to open detail modal (from_feed=True)
                 if activity_hash:
@@ -2497,12 +2709,12 @@ root.destroy()
                         with ui.row().classes('w-full justify-between items-start'):
                             # LEFT: Title & Time
                             with ui.column().classes('gap-0'):
-                                ui.label(formatted_date).classes('font-bold text-zinc-200 text-sm group-hover:text-white transition-colors')
-                                ui.label(formatted_time).classes('text-xs text-zinc-500 group-hover:text-zinc-400 transition-colors')
+                                ui.label(formatted_date).classes('font-bold text-zinc-200 text-sm')
+                                ui.label(formatted_time).classes('text-xs text-zinc-500')
                             
-                            # RIGHT: Calories
+                            # RIGHT: Calories (in stats grid style)
                             if d.get('calories'):
-                                with ui.row().classes('items-center gap-3 text-xs text-zinc-300 bg-zinc-800/50 px-2 py-1 rounded border border-zinc-700/50 group-hover:bg-zinc-700 transition-colors'):
+                                with ui.row().classes('items-center gap-3 text-xs text-zinc-300 bg-zinc-800/50 px-2 py-1 rounded border border-zinc-700/50'):
                                     with ui.row().classes('items-center gap-1'):
                                         ui.icon('local_fire_department').classes('text-xs text-orange-400')
                                         ui.label(f"{d['calories']} cal")
@@ -2513,58 +2725,69 @@ root.destroy()
                             for tag in run_type_tag.split(' | '):
                                 ui.label(tag).classes('text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 tracking-wide')
                             
-                            # --- ROW 2: Context Tags ---
-                        with ui.row().classes('w-full items-center gap-2 mt-2'):
-                            # Terrain Tag
-                            for tag in run_type_tag.split(' | '):
-                                ui.label(tag).classes('text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 tracking-wide')
-                            
-                            # Physio Tag
+                            # 2. Physio Tag (Garmin's Training Effect) - Wrapped in tag container
+                            # "The Truth" - Shows Intent (Tempo, Base, Speed)
                             if d.get('te_label'):
                                 te_color = d.get('te_label_color', 'text-zinc-400')
-                                if 'text-purple-400' in te_color: bg_color, border_color = 'bg-purple-500/10', 'border-purple-500/30'
-                                elif 'text-red-400' in te_color: bg_color, border_color = 'bg-red-500/10', 'border-red-500/30'
-                                elif 'text-orange-400' in te_color: bg_color, border_color = 'bg-orange-500/10', 'border-orange-500/30'
-                                elif 'text-emerald-400' in te_color: bg_color, border_color = 'bg-emerald-500/10', 'border-emerald-500/30'
-                                elif 'text-blue-400' in te_color: bg_color, border_color = 'bg-blue-500/10', 'border-blue-500/30'
-                                else: bg_color, border_color = 'bg-zinc-800', 'border-zinc-700'
+                                # Extract just the color class for text
+                                if 'text-purple-400' in te_color:
+                                    bg_color = 'bg-purple-500/10'
+                                    border_color = 'border-purple-500/30'
+                                elif 'text-red-400' in te_color:
+                                    bg_color = 'bg-red-500/10'
+                                    border_color = 'border-red-500/30'
+                                elif 'text-orange-400' in te_color:
+                                    bg_color = 'bg-orange-500/10'
+                                    border_color = 'border-orange-500/30'
+                                elif 'text-emerald-400' in te_color:
+                                    bg_color = 'bg-emerald-500/10'
+                                    border_color = 'border-emerald-500/30'
+                                elif 'text-blue-400' in te_color:
+                                    bg_color = 'bg-blue-500/10'
+                                    border_color = 'border-blue-500/30'
+                                else:
+                                    bg_color = 'bg-zinc-800'
+                                    border_color = 'border-zinc-700'
                                 
+                                # Extract text color
                                 text_color = te_color.split()[0] if ' ' in te_color else te_color
+                                
                                 ui.label(d['te_label']).classes(f"text-[10px] font-bold px-2 py-0.5 rounded {bg_color} border {border_color} {text_color} tracking-wide")
-
-                        # --- ROW 3: Main Metrics Grid ---
+                        
+                        # --- ROW 3: Main Content - Metrics Grid + Strain Ring ---
                         with ui.row().classes('w-full gap-4 mb-1 items-center mt-3'):
+                            # Left: Primary Metrics Grid (flex-grow to take available space)
                             with ui.column().classes('flex-1'):
                                 with ui.grid(columns=5).classes('w-full gap-3'):
-                                    # Distance
+                                    # Distance (with icon)
                                     with ui.column().classes('gap-0').style('line-height: 1.1;'):
                                         with ui.row().classes('items-center gap-1'):
                                             ui.icon('straighten').classes('text-blue-400 text-xs')
                                             ui.label('DISTANCE').classes('text-[10px] text-gray-500 font-bold tracking-wider')
                                         ui.label(f"{d.get('distance_mi', 0):.1f} mi").classes('text-lg font-bold').style('line-height: 1;')
                                     
-                                    # Elevation
+                                    # Elevation (with icon)
                                     with ui.column().classes('gap-0').style('line-height: 1.1;'):
                                         with ui.row().classes('items-center gap-1'):
                                             ui.icon('terrain').classes('text-green-400 text-xs')
                                             ui.label('ELEVATION').classes('text-[10px] text-gray-500 font-bold tracking-wider')
                                         ui.label(f"{d.get('elevation_ft', 0)} ft").classes('text-lg font-bold').style('line-height: 1;')
                                     
-                                    # Pace
+                                    # Pace (with icon)
                                     with ui.column().classes('gap-0').style('line-height: 1.1;'):
                                         with ui.row().classes('items-center gap-1'):
                                             ui.icon('speed').classes('text-purple-400 text-xs')
                                             ui.label('PACE').classes('text-[10px] text-gray-500 font-bold tracking-wider')
                                         ui.label(d.get('pace', '--')).classes('text-lg font-bold').style('line-height: 1;')
                                         
-                                    # Efficiency
+                                    # Efficiency (with info icon)
                                     with ui.column().classes('gap-0').style('line-height: 1.1;'):
                                         with ui.row().classes('items-center gap-1'):
                                             ui.label('EFFICIENCY').classes('text-[10px] text-gray-500 font-bold tracking-wider')
                                             ui.icon('help_outline').classes('text-zinc-600 hover:text-white text-[10px] cursor-pointer').on('click.stop', lambda: self.show_ef_info())
                                         ui.label(f"{d.get('efficiency_factor', 0):.2f}").classes('text-lg font-bold').style('color: #10B981; line-height: 1;')
                                         
-                                    # Decoupling
+                                    # Decoupling (with info icon)
                                     with ui.column().classes('gap-0').style('line-height: 1.1;'):
                                         with ui.row().classes('items-center gap-1'):
                                             ui.label('DECOUPLING').classes('text-[10px] text-gray-500 font-bold tracking-wider')
@@ -2572,29 +2795,49 @@ root.destroy()
                                         cost_color = '#10B981' if cost <= 5 else '#ff4d4d'
                                         ui.label(f"{cost:.1f}%").classes(f'text-lg font-bold').style(f'color: {cost_color}; line-height: 1;')
                             
+                            # Vertical Divider (subtle, darker gray)
                             ui.element('div').classes('h-full').style('width: 1px; background-color: #27272a; margin: 0 8px;')
                             
+                            # Right: Strain Score Ring
                             with ui.column().classes('items-center justify-center gap-1 mr-2'):
+                                # Circular progress ring with strain value
                                 with ui.element('div').classes('relative'):
                                     ui.circular_progress(value=min(strain/500, 1.0), size='80px', color=strain_color, show_value=False)
+                                    # Center text (strain score)
                                     with ui.element('div').classes('absolute inset-0 flex items-center justify-center'):
                                         ui.label(str(strain)).classes('text-xl font-bold')
+                                
+                                # Label row with info icon (emphasize the insight)
                                 with ui.row().classes('items-center gap-1'):
                                     ui.icon('help_outline').classes('text-zinc-600 hover:text-white text-[10px] cursor-pointer').on('click.stop', lambda: self.show_load_info())
                                     ui.label('LOAD:').classes('text-xs text-zinc-300 font-bold uppercase tracking-widest')
                                     ui.label(strain_label).classes(f'text-sm font-bold').style(f'color: {strain_text_color};')
-
-                        # --- ROW 4: Footer - CLEANED UP (Removed Max HR & Max Speed) ---
+                        
+                        # --- ROW 4: Footer - Peak Stats + HR Recovery ---
                         ui.separator().classes('my-1').style('background-color: #52525b; height: 1px;')
                         with ui.row().classes('w-full justify-between items-center'):
-                            # Left: Essential Stats Only (Reduced Clutter)
+                            # Left: Peak Stats with Icons and Labels (5 columns now)
                             with ui.row().classes('gap-6'):
-                                # Avg HR
+                                # Max HR
+                                with ui.column().classes('items-center gap-0'):
+                                    ui.label('MAX HR').classes('text-[9px] text-gray-500 font-bold tracking-wider mb-0.5')
+                                    with ui.row().classes('items-center gap-1'):
+                                        ui.icon('monitor_heart').classes('text-red-400 text-sm')
+                                        ui.label(f"{d.get('max_hr', 0)}").classes('text-sm font-bold text-white')
+                                
+                                # Avg HR (moved next to Max HR)
                                 with ui.column().classes('items-center gap-0'):
                                     ui.label('AVG HR').classes('text-[9px] text-gray-500 font-bold tracking-wider mb-0.5')
                                     with ui.row().classes('items-center gap-1'):
                                         ui.icon('favorite').classes('text-pink-400 text-sm')
                                         ui.label(f"{d.get('avg_hr', 0)}").classes('text-sm font-bold text-white')
+                                
+                                # Max Speed
+                                with ui.column().classes('items-center gap-0'):
+                                    ui.label('MAX SPEED').classes('text-[9px] text-gray-500 font-bold tracking-wider mb-0.5')
+                                    with ui.row().classes('items-center gap-1'):
+                                        ui.icon('bolt').classes('text-yellow-400 text-sm')
+                                        ui.label(f"{d.get('max_speed_mph', 0):.1f}").classes('text-sm font-bold text-white')
                                 
                                 # Cadence
                                 with ui.column().classes('items-center gap-0'):
@@ -2603,7 +2846,7 @@ root.destroy()
                                         ui.icon('directions_run').classes('text-blue-400 text-sm')
                                         ui.label(f"{d.get('avg_cadence', 0)}").classes('text-sm font-bold text-white')
                             
-                            # Right: Form Status Indicator
+                            # Right: Form Status Indicator (replaces HR Recovery)
                             form = analyze_form(
                                 d.get('avg_cadence'),
                                 d.get('avg_stance_time'),
@@ -2611,19 +2854,31 @@ root.destroy()
                                 d.get('avg_vertical_oscillation')
                             )
                             if form['verdict'] != 'ANALYZING':
+                                # Determine background and border colors based on verdict (10% opacity tint)
                                 if form['verdict'] in ['ELITE FORM', 'GOOD FORM']:
-                                    pill_bg, pill_border, pill_text = 'bg-emerald-500/10', 'border-emerald-700/30', 'text-emerald-400'
+                                    pill_bg = 'bg-emerald-500/10'
+                                    pill_border = 'border-emerald-700/30'
+                                    pill_text = 'text-emerald-400'
                                 elif form['verdict'] in ['OVERSTRIDING', 'HEAVY FEET', 'INEFFICIENT']:
-                                    pill_bg, pill_border, pill_text = 'bg-amber-500/10', 'border-amber-700/30', 'text-amber-400'
+                                    pill_bg = 'bg-amber-500/10'
+                                    pill_border = 'border-amber-700/30'
+                                    pill_text = 'text-amber-400'
                                 elif form['verdict'] in ['LOW CADENCE', 'PLODDING']:
-                                    pill_bg, pill_border, pill_text = 'bg-red-500/10', 'border-red-700/30', 'text-red-400'
+                                    pill_bg = 'bg-red-500/10'
+                                    pill_border = 'border-red-700/30'
+                                    pill_text = 'text-red-400'
                                 else:
-                                    pill_bg, pill_border, pill_text = 'bg-slate-500/10', 'border-slate-700/30', 'text-slate-400'
+                                    pill_bg = 'bg-slate-500/10'
+                                    pill_border = 'border-slate-700/30'
+                                    pill_text = 'text-slate-400'
+                                
+                                # Convert verdict to title case
+                                verdict_display = form['verdict'].title()
                                 
                                 with ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {pill_bg} {pill_border}'):
                                     ui.label('🦶').classes('text-sm')
                                     ui.label('Form:').classes(f'text-xs font-bold {pill_text}')
-                                    ui.label(form['verdict'].title()).classes(f'text-xs font-bold {pill_text}')
+                                    ui.label(verdict_display).classes(f'text-xs font-bold {pill_text}')
     
     def show_hrr_info(self):
         """
@@ -2671,50 +2926,6 @@ A sign your body is struggling to recover from recent hard training.
         
         dialog.open()
     
-    def show_volume_info(self):
-        """
-        Show informational modal about Volume Classification logic.
-        Explains the 'Ultra Trinity' (Terrain, HR, Mechanics).
-        """
-        with ui.dialog() as dialog, ui.card().classes('bg-zinc-900 text-white p-6 max-w-2xl border border-zinc-800'):
-            # Title (Clean, no X)
-            ui.label('Volume Quality Analysis').classes('text-xl font-bold text-white mb-2')
-            
-            # The 3 Buckets Grid
-            with ui.column().classes('gap-6'):
-                
-                # 1. High Quality (Green)
-                with ui.row().classes('gap-4 items-start'):
-                    ui.icon('verified').classes('text-emerald-400 text-2xl mt-1')
-                    with ui.column().classes('gap-1'):
-                        ui.label('High Quality (The Engine)').classes('text-base font-bold text-emerald-400')
-                        ui.label('Running on flat/rolling terrain with good mechanics (Cadence > 160) and honest effort. These miles build fitness without breaking the chassis.').classes('text-sm text-zinc-300')
-
-                # 2. Structural (Blue)
-                with ui.row().classes('gap-4 items-start'):
-                    ui.icon('hiking').classes('text-blue-400 text-2xl mt-1')
-                    with ui.column().classes('gap-1'):
-                        ui.label('Structural (The Base)').classes('text-base font-bold text-blue-400')
-                        ui.label('Valid volume that includes Hiking (Steep Grade), Recovery Shuffles (Low HR), or Walking. These miles build durability and aerobic base without the mechanical stress of fast running.').classes('text-sm text-zinc-300')
-
-                # 3. Broken (Red)
-                with ui.row().classes('gap-4 items-start'):
-                    ui.icon('warning').classes('text-red-400 text-2xl mt-1')
-                    with ui.column().classes('gap-1'):
-                        ui.label('Broken (The Junk)').classes('text-base font-bold text-red-400')
-                        ui.label('The "Danger Zone." You are working hard (High HR) but moving poorly (Low Cadence). This usually happens at the end of long runs when form falls apart. These miles cause injury.').classes('text-sm text-zinc-300')
-
-            # The "Why" Footer
-            ui.separator().classes('my-6 border-zinc-800')
-            with ui.column().classes('gap-2 mb-4'):
-                ui.label('How we decide:').classes('text-xs font-bold text-zinc-500 uppercase tracking-wider')
-                ui.label('We analyze every single mile split against Terrain, Metabolic Cost, and Mechanics.').classes('text-sm text-zinc-400')
-
-            # "Got it!" Button
-            ui.button('Got it!', on_click=dialog.close).classes('w-full bg-green-600 hover:bg-green-500 text-white font-bold')
-
-        dialog.open()
-
     def show_ef_info(self):
         """
         Show informational modal about Running Efficiency.
@@ -3087,7 +3298,7 @@ Activity Breakdown: {activity_breakdown}
                 ''')
                 
                 # Handle view and delete button clicks
-                table.on('view-row', lambda e: self.open_activity_detail_modal(e.args['hash'], from_feed=True))
+                table.on('view-row', lambda e: self.open_activity_detail_modal(e.args['hash']))
                 table.on('delete-row', lambda e: self.delete_activity_inline(e.args['hash'], e.args['full_filename']))
                 
                 # Apply dark theme styling
@@ -3327,137 +3538,104 @@ Activity Breakdown: {activity_breakdown}
         return " | ".join(tags)
     
     def generate_weekly_volume_chart(self):
-        """
-        Generate weekly volume chart. 
-        Updates: 
-        1. Passes 'Category Name' to click handler for better Modal Titles.
-        2. Adds 'cursor-pointer' to the chart for better UX.
-        """
+        """Generate weekly volume composition chart."""
         if self.df is None or self.df.empty:
             return None
         
-        # ... (Data prep code remains the same until Chart Data construction) ...
-        # [Use your existing data prep logic here]
-        # Re-pasting the relevant data construction block for context:
+        import plotly.graph_objects as go
         
-        # Add week column
+        # Add week column (Monday start)
         self.df['week_start'] = self.df['date_obj'].dt.to_period('W-MON').dt.start_time
         
-        # 1. PREPARE DATA
-        split_data = []
-        for activity in self.activities_data:
-            date_obj = pd.to_datetime(activity.get('date'))
-            week_start = date_obj.to_period('W-MON').start_time
-            max_hr = activity.get('max_hr', 185)
-            act_hash = activity.get('db_hash')
-            act_date_str = date_obj.strftime('%-m/%-d')
+        # Classify each run's form quality
+        def classify_quality(row):
+            cadence = row.get('avg_cadence', 0)
+            gct = row.get('avg_stance_time', 0)  # Fixed: use correct field name
+            stride = row.get('avg_step_length', 0)  # Fixed: use correct field name
+            bounce = row.get('avg_vertical_oscillation', 0)  # Fixed: use correct field name
             
-            laps = activity.get('lap_data', [])
-            if not laps:
-                dist = activity.get('distance_mi', 0)
-                if dist == 0: continue
-                raw_cad = activity.get('avg_cadence', 0)
-                cad = raw_cad * 2 if raw_cad < 100 else raw_cad
-                laps = [{
-                    'distance': dist * 1609.34, 'avg_cadence': raw_cad, 
-                    'avg_hr': activity.get('avg_hr', 0), 'total_ascent': activity.get('elevation_ft', 0) / 3.28084
-                }]
-
-            for lap in laps:
-                dist_m = lap.get('distance', 0)
-                dist_mi = dist_m * 0.000621371
-                if dist_mi < 0.1: continue
-                raw_cad = lap.get('avg_cadence', 0)
-                cadence = raw_cad * 2 if raw_cad < 120 else raw_cad
-                hr = lap.get('avg_hr', 0)
-                ascent = lap.get('total_ascent', 0) or 0
-                grade = (ascent / dist_m) * 100 if dist_m > 0 else 0
-                category = classify_split(cadence, hr, max_hr, grade)
-                split_data.append({
-                    'week_start': week_start, 'distance': dist_mi, 'category': category,
-                    'hash': act_hash, 'date_str': act_date_str
-                })
-
-        if not split_data:
-            return None
+            form_result = analyze_form(cadence, gct, stride, bounce)
+            verdict = form_result.get('verdict', '')
             
-        df_splits = pd.DataFrame(split_data)
+            # Match the verdict calculation logic
+            if verdict in ['OVERSTRIDING', 'HEAVY FEET', 'INEFFICIENT']:
+                return 'Garbage Miles'
+            else:
+                return 'Quality Miles'
         
-        # Verdict Data Storage
-        weekly_vol = df_splits.groupby(['week_start', 'category'])['distance'].sum().unstack(fill_value=0)
-        for col in ['HIGH QUALITY', 'STRUCTURAL', 'BROKEN']:
-            if col not in weekly_vol.columns: weekly_vol[col] = 0
-        self.weekly_volume_data = weekly_vol
+        self.df['quality'] = self.df.apply(classify_quality, axis=1)
         
-        # 2. AGGREGATE FOR CHART
-        grouped = df_splits.groupby(['week_start', 'category'])
-        weeks = sorted(df_splits['week_start'].unique())
-        categories = ['STRUCTURAL', 'HIGH QUALITY', 'BROKEN']
+        # Aggregate by week and quality
+        weekly_data = self.df.groupby(['week_start', 'quality'])['distance_mi'].sum().unstack(fill_value=0)
         
-        chart_data = {cat: {'y': [], 'customdata': []} for cat in categories}
+        # Ensure both columns exist
+        if 'Quality Miles' not in weekly_data.columns:
+            weekly_data['Quality Miles'] = 0
+        if 'Garbage Miles' not in weekly_data.columns:
+            weekly_data['Garbage Miles'] = 0
+        
+        # Format X-axis labels as "Sun, M/D - Sat, M/D"
         week_labels = []
+        for week_start in weekly_data.index:
+            # Week starts on Monday, so Sunday is 6 days before
+            sunday = week_start - pd.Timedelta(days=1)
+            saturday = week_start + pd.Timedelta(days=5)
+            label = f"Sun, {sunday.strftime('%-m/%-d')} - Sat, {saturday.strftime('%-m/%-d')}"
+            week_labels.append(label)
         
-        for week in weeks:
-            sunday = week - pd.Timedelta(days=1)
-            saturday = week + pd.Timedelta(days=5)
-            week_labels.append(f"{sunday.strftime('%b %-d')} - {saturday.strftime('%-d')}")
-            
-            for cat in categories:
-                try:
-                    cell = grouped.get_group((week, cat))
-                    total_dist = cell['distance'].sum()
-                    unique_acts = cell[['hash', 'date_str']].drop_duplicates()
-                    
-                    dates_list = unique_acts['date_str'].tolist()
-                    if len(dates_list) > 3:
-                        date_display = ", ".join(dates_list[:3]) + f" (+{len(dates_list)-3})"
-                    else:
-                        date_display = ", ".join(dates_list)
-                    
-                    hash_list = unique_acts['hash'].tolist()
-                    chart_data[cat]['y'].append(total_dist)
-                    
-                    # UPDATED CUSTOMDATA: Added 'cat' (Category Name) at index 2
-                    chart_data[cat]['customdata'].append([date_display, json.dumps(hash_list), cat])
-                    
-                except KeyError:
-                    chart_data[cat]['y'].append(0)
-                    chart_data[cat]['customdata'].append(["", "[]", cat])
-
-        # 3. BUILD FIGURE
+        # Create figure
         fig = go.Figure()
-        bar_style = dict(opacity=0.85, marker_line=dict(width=1, color='rgba(255,255,255,0.1)'))
         
-        def add_trace(cat, name, color, desc, rank):
-            fig.add_trace(go.Bar(
-                x=week_labels, y=chart_data[cat]['y'], name=name, marker_color=color,
-                customdata=chart_data[cat]['customdata'],
-                hovertemplate=(
-                    '<b>%{y:.1f} mi</b><br>'
-                    '<span style="color: #cbd5e1; font-size: 12px;">' + desc + '</span><br>'
-                    '<span style="color: rgba(255,255,255,0.8); font-size: 11px;">Runs: %{customdata[0]}</span>'
-                    '<extra></extra>'
-                ),
-                
-                hoverlabel=dict(font=dict(color='white'), bordercolor='white'),
-                legendrank=rank, 
-                **bar_style
-            ))
-
-        add_trace('STRUCTURAL', 'Structural', '#3b82f6', 'Valid Base/Hills', 1)
-        add_trace('HIGH QUALITY', 'High Quality', '#10b981', 'Dialed Mechanics', 2)
-        add_trace('BROKEN', 'Broken', '#f43f5e', 'Mechanical Failure', 3)
+        # Add "Quality Miles" bars (bottom stack - green)
+        fig.add_trace(go.Bar(
+            x=week_labels,
+            y=weekly_data['Quality Miles'],
+            name='Quality Miles',
+            marker_color='#10b981',
+            hoverinfo='skip'
+        ))
         
+        # Add "Garbage Miles" bars (top stack - red)
+        fig.add_trace(go.Bar(
+            x=week_labels,
+            y=weekly_data['Garbage Miles'],
+            name='Garbage Miles',
+            marker_color='#f43f5e',
+            hoverinfo='skip'
+        ))
+        
+        # Update layout
         fig.update_layout(
-            barmode='stack', template='plotly_dark',
-            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-            height=300, margin=dict(l=40, r=20, t=20, b=80),
-            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal"),
-            bargap=0.35, xaxis=dict(tickangle=0, showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-            yaxis=dict(title='Miles', showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-            clickmode='event'
+            barmode='stack',
+            template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            height=300,
+            margin=dict(l=40, r=20, t=20, b=80),
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            ),
+            xaxis=dict(
+                tickangle=-45,
+                showgrid=True,
+                gridcolor='rgba(255, 255, 255, 0.1)'
+            ),
+            yaxis=dict(
+                title='Miles',
+                showgrid=True,
+                gridcolor='rgba(255, 255, 255, 0.1)'
+            )
         )
-        fig.update_layout(modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']})
+        
+        # Hide modebar
+        fig.update_layout(
+            modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']}
+        )
         
         return fig
     
@@ -3596,43 +3774,37 @@ Activity Breakdown: {activity_breakdown}
         form_colors = []
         
         for idx, row in self.df.iterrows():
-            # FIX: Use correct field names from Garmin FIT standard
             form = analyze_form(
                 row.get('avg_cadence', 0),
-                row.get('avg_stance_time', 0),
-                row.get('avg_step_length', 0),
-                row.get('avg_vertical_oscillation', 0)
+                row.get('avg_gct', 0),
+                row.get('avg_stride', 0),
+                row.get('avg_bounce', 0)
             )
             form_verdicts.append(form['verdict'])
             
-            # Extract hex color
+            # Extract hex color from the color class
             color_class = form['color']
             if 'emerald' in color_class:
                 form_colors.append('#10b981')
             elif 'blue' in color_class:
-                form_colors.append('#3b82f6')
+                form_colors.append('#60a5fa')
             elif 'yellow' in color_class:
-                form_colors.append('#eab308')
+                form_colors.append('#fbbf24')
             elif 'orange' in color_class:
-                form_colors.append('#f97316')
+                form_colors.append('#fb923c')
             elif 'red' in color_class:
                 form_colors.append('#ef4444')
             else:
                 form_colors.append('#71717a')
         
-        # Add cadence scatter (Restored: Blue Dotted Line + Colored Markers)
+        # Add cadence scatter with form status
         fig.add_trace(
             go.Scatter(
                 x=self.df['date_obj'],
                 y=self.df['avg_cadence'],
                 mode='markers+lines',
-                marker=dict(
-                    size=8, 
-                    color=form_colors, # Data-driven colors
-                    line=dict(width=1, color='white')
-                ),
-                # RESTORED: The crisp indigo dotted line
-                line=dict(color='#6366f1', width=2, dash='dot'), 
+                marker=dict(size=8, color='#6366f1', line=dict(width=1, color='white')),
+                line=dict(color='#6366f1', width=2, dash='dot'),
                 name='Cadence',
                 customdata=list(zip(form_verdicts, form_colors, self.df['date_obj'].dt.strftime('%b %d, %Y'))),
                 hovertemplate=(
@@ -4093,118 +4265,71 @@ Activity Breakdown: {activity_breakdown}
         # --- 10. Return figure object ---
         return fig
     
-    def calculate_volume_verdict(self, df=None, start_index=None, end_index=None):
+    def calculate_volume_verdict(self, df):
         """
-        Verdict based on 'Broken Ratio' (Red Miles / Total Miles).
-        Returns: HIGH QUALITY, STRUCTURAL, or BROKEN badge.
+        Calculate verdict for Volume chart based on garbage miles percentage.
+        
+        Returns:
+            tuple: (verdict_text, verdict_color, verdict_bg)
         """
-        if self.weekly_volume_data is None:
+        if df is None or df.empty:
             return 'N/A', '#71717a', 'bg-zinc-700'
+        
+        # Calculate percentage of bad form miles
+        def classify_quality(row):
+            cadence = row.get('avg_cadence', 0)
+            gct = row.get('avg_stance_time', 0)
+            stride = row.get('avg_step_length', 0)
+            bounce = row.get('avg_vertical_oscillation', 0)
             
-        data = self.weekly_volume_data
+            form_result = analyze_form(cadence, gct, stride, bounce)
+            return 'garbage' if form_result['verdict'] in ['OVERSTRIDING', 'HEAVY FEET', 'INEFFICIENT'] else 'quality'
         
-        # Zoom Logic
-        if start_index is not None and end_index is not None:
-            start = max(0, int(round(start_index)))
-            end = min(len(data), int(round(end_index)) + 1)
-            if start < len(data) and end > start:
-                data = data.iloc[start:end]
+        # Create a copy to avoid modifying original df
+        df_copy = df.copy()
+        df_copy['quality'] = df_copy.apply(classify_quality, axis=1)
+        total_miles = df_copy['distance_mi'].sum()
+        garbage_miles = df_copy[df_copy['quality'] == 'garbage']['distance_mi'].sum()
         
-        # Calculate Sums using new key 'BROKEN'
-        total_broken = data['BROKEN'].sum() if 'BROKEN' in data.columns else 0
-        total_vol = data.sum().sum()
+        if total_miles > 0:
+            garbage_pct = (garbage_miles / total_miles) * 100
+            
+            if garbage_pct < 10:
+                return 'SOLID', '#10b981', 'bg-emerald-500/20'
+            elif garbage_pct <= 30:
+                return 'MEH', '#3b82f6', 'bg-blue-500/20'
+            else:
+                return 'GARBAGE', '#ef4444', 'bg-red-500/20'
         
-        if total_vol == 0: return 'N/A', '#71717a', 'bg-zinc-700'
-        
-        broken_ratio = (total_broken / total_vol) * 100
-        
-        # Verdict Thresholds (Matching the Legend Terms)
-        if broken_ratio < 10:
-            return 'HIGH QUALITY', '#10b981', 'bg-emerald-500/20'
-        elif broken_ratio < 25:
-            return 'STRUCTURAL', '#3b82f6', 'bg-blue-500/20'
-        else:
-            return 'BROKEN', '#ef4444', 'bg-red-500/20'
+        return 'N/A', '#71717a', 'bg-zinc-700'
     
     def calculate_cadence_verdict(self, df):
         """
-        Calculate verdict for Mechanics chart based on 'Form Score' Analysis.
-        Returns: ELITE (90+), GOOD (60+), or BROKEN (<60).
+        Calculate verdict for Cadence chart based on slope.
+        
+        Returns:
+            tuple: (verdict_text, verdict_color, verdict_bg)
         """
         if df is None or df.empty or len(df) < 2:
             return 'N/A', '#71717a', 'bg-zinc-700'
         
-        # 1. Convert Form Verdicts to Numeric Scores
-        scores = []
-        dates = []
-        
-        for idx, row in df.iterrows():
-            form = analyze_form(
-                row.get('avg_cadence', 0),
-                row.get('avg_stance_time', 0),
-                row.get('avg_step_length', 0),
-                row.get('avg_vertical_oscillation', 0)
-            )
-            verdict = form['verdict']
-            
-            # Scoring Logic (Weighted Average)
-            if verdict == 'ELITE FORM':
-                scores.append(100)
-                dates.append(row['date_obj'])
-            elif verdict == 'GOOD FORM':
-                scores.append(80)
-                dates.append(row['date_obj'])
-            elif verdict in ['HIKING / REST', 'AEROBIC / MIXED']:
-                # Skip structural miles - don't penalize strategy
-                continue 
-            elif verdict in ['PLODDING', 'LOW CADENCE']:
-                scores.append(40)
-                dates.append(row['date_obj'])
-            elif verdict in ['OVERSTRIDING', 'HEAVY FEET', 'INEFFICIENT']:
-                scores.append(0)
-                dates.append(row['date_obj'])
-                
-        # If no valid running data (only hiking), return Neutral
-        if not scores:
-            return 'STRUCTURAL', '#3b82f6', 'bg-blue-500/20'
-            
-        # 2. Calculate Average Quality (The "State")
-        avg_score = sum(scores) / len(scores)
-        
-        # 3. Calculate Trend (The "Trajectory")
         try:
             from scipy.stats import linregress
-            # Convert dates to seconds for regression
-            x_nums = [(d - min(dates)).total_seconds() for d in dates]
-            slope, _, _, _, _ = linregress(x_nums, scores)
-            # Normalize slope to "Points per week"
-            slope_week = slope * 604800
+            x_nums = (df['date_obj'] - df['date_obj'].min()).dt.total_seconds()
+            y_cadence = df['avg_cadence']
+            slope, _, _, _, _ = linregress(x_nums, y_cadence)
+            
+            # Slope in cadence units per second, convert to per week
+            slope_per_week = slope * 604800
+            
+            if slope_per_week > 0.5:
+                return 'SOLID', '#10b981', 'bg-emerald-500/20'
+            elif slope_per_week >= -0.5:
+                return 'MEH', '#3b82f6', 'bg-blue-500/20'
+            else:
+                return 'GARBAGE', '#ef4444', 'bg-red-500/20'
         except:
-            slope_week = 0
-
-        # --- FINAL VERDICT LOGIC (Professor Grading Scale) ---
-        
-        # Scenario A: ELITE (Must be >= 90)
-        # Your 83.75 will fail this check.
-        if avg_score >= 90:
-            if slope_week < -10: 
-                return 'SLIPPING', '#fbbf24', 'bg-yellow-500/20'
-            return 'ELITE', '#10b981', 'bg-emerald-500/20'
-            
-        # Scenario B: GOOD (60 - 89)
-        # Your 83.75 lands here.
-        elif avg_score >= 60:
-            if slope_week > 10:
-                return 'IMPROVING', '#10b981', 'bg-emerald-500/20'
-            elif slope_week < -10:
-                return 'SLIPPING', '#fbbf24', 'bg-yellow-500/20'
-            return 'GOOD', '#3b82f6', 'bg-blue-500/20'
-            
-        # Scenario C: BROKEN (< 60)
-        else:
-            if slope_week > 10:
-                return 'IMPROVING', '#3b82f6', 'bg-blue-500/20'
-            return 'BROKEN', '#ef4444', 'bg-red-500/20'
+            return 'N/A', '#71717a', 'bg-zinc-700'
     
     def calculate_efficiency_verdict(self, df):
         """
@@ -4302,26 +4427,16 @@ Activity Breakdown: {activity_breakdown}
                     # Calculate volume verdict
                     vol_verdict, vol_color, vol_bg = self.calculate_volume_verdict(self.df)
                     
-                    # ADDED 'relative' class to the card so we can pin the icon
-                    with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8 relative').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
-                        
-                        # The Silicon Valley Info Icon (ABSOLUTE POSITIONED)
-                        # top-5 right-5 puts it slightly higher/wider than the p-6 content padding
-                        ui.icon('help_outline').classes('absolute top-5 right-5 text-zinc-500 hover:text-white transition-colors duration-200 cursor-pointer text-2xl').on(
-                            'click', lambda: self.show_volume_info()
-                        )
-
-                        # Header Row (Now simpler, just Title + Badge)
+                    with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
+                        # Header with verdict badge
                         with ui.row().classes('w-full items-center gap-3 mb-1'):
                             ui.label('Training Volume').classes('text-xl font-bold text-white')
                             self.volume_verdict_label = ui.label(f'[ {vol_verdict} ]').classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}').style(f'color: {vol_color};')
-                            
-                        ui.label('Breakdown in quality of miles').classes('text-sm text-zinc-400 mb-4')
+                        ui.label('Breakdown of quality miles vs. garbage miles').classes('text-sm text-zinc-400 mb-4')
                         
                         # Chart with zoom binding
-                        self.volume_chart = ui.plotly(volume_fig).classes('w-full').style('cursor: pointer')
+                        self.volume_chart = ui.plotly(volume_fig).classes('w-full')
                         self.volume_chart.on('plotly_relayout', self.handle_volume_zoom)
-                        self.volume_chart.on('plotly_click', self.handle_bar_click)
                 
                 # 2. Efficiency & Decoupling Card (with unified dual-metric stats bar)
                 efficiency_fig = self.generate_efficiency_decoupling_chart()
@@ -4496,33 +4611,29 @@ Activity Breakdown: {activity_breakdown}
             # Silently catch errors
             pass
     
-    def handle_volume_zoom(self, e):
+    async def handle_volume_zoom(self, e):
         """
-        Handle zoom events on Volume Chart (Categorical Axis).
-        Translates index ranges to data slices.
+        Handle zoom events on the Volume chart and update verdict dynamically.
         """
         try:
-            if 'xaxis.range[0]' in e.args and 'xaxis.range[1]' in e.args:
-                # Get indices (float)
-                idx_start = e.args['xaxis.range[0]']
-                idx_end = e.args['xaxis.range[1]']
+            print(f"Volume zoom event: {e.args}")  # Debug: see what Plotly sends
+            
+            # For bar charts with categorical x-axis, zoom might not work the same way
+            # Let's just recalculate on any relayout event
+            if e.args:
+                # Always recalculate using full dataset for now
+                # TODO: Implement proper week-based filtering once we understand the event structure
+                vol_verdict, vol_color, vol_bg = self.calculate_volume_verdict(self.df)
                 
-                # Recalculate with slice
-                vol_verdict, vol_color, vol_bg = self.calculate_volume_verdict(
-                    start_index=idx_start, 
-                    end_index=idx_end
-                )
-            else:
-                # Reset / Autorange
-                vol_verdict, vol_color, vol_bg = self.calculate_volume_verdict()
-            
-            # Update UI
-            self.volume_verdict_label.set_text(f'[ {vol_verdict} ]')
-            self.volume_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-zinc-700 bg-zinc-800 text-zinc-500')
-            self.volume_verdict_label.style(f'color: {vol_color};')
-            
+                # Update verdict label
+                self.volume_verdict_label.set_text(f'[ {vol_verdict} ]')
+                self.volume_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-zinc-700')
+                self.volume_verdict_label.style(f'color: {vol_color};')
+                
         except Exception as ex:
-            print(f"Volume Zoom Error: {ex}")
+            print(f"Volume zoom error: {ex}")
+            import traceback
+            traceback.print_exc()
     
     async def handle_cadence_zoom(self, e):
         """
@@ -4893,102 +5004,6 @@ TRAINING ZONES:
             import traceback
             traceback.print_exc()
     
-    async def handle_bar_click(self, e):
-        """
-        Handle click on Volume Bar.
-        Fixes:
-        1. Pace Bug: Calculates pace from duration/distance (Fail-safe).
-        2. Routing: Forces the 'Nice Modal' (from_feed=True).
-        """
-        try:
-            point_data = e.args['points'][0]
-            custom_data = point_data.get('customdata', [])
-            
-            if not custom_data or len(custom_data) < 3:
-                return
-                
-            hash_list = json.loads(custom_data[1])
-            category_raw = custom_data[2]
-            
-            if not hash_list: return
-            
-            # Scenario A: Single Run -> Open Nice Modal
-            if len(hash_list) == 1:
-                await self.open_activity_detail_modal(hash_list[0], from_feed=True)
-                return
-
-            # Scenario B: Selector Menu
-            style_map = {
-                'HIGH QUALITY': ('text-emerald-400', 'bg-emerald-500/20', 'border-emerald-500/30'),
-                'STRUCTURAL': ('text-blue-400', 'bg-blue-500/20', 'border-blue-500/30'),
-                'BROKEN': ('text-red-400', 'bg-red-500/20', 'border-red-500/30')
-            }
-            txt_col, bg_col, border_col = style_map.get(category_raw, ('text-zinc-400', 'bg-zinc-800', 'border-zinc-700'))
-            category_label = category_raw.replace('_', ' ').title()
-
-            async def pick_run(h, dlg):
-                dlg.close()
-                await asyncio.sleep(0.1)
-                await self.open_activity_detail_modal(h, from_feed=True) # <--- Force Nice Modal
-
-            with ui.dialog() as selector_dialog, ui.card().classes('bg-zinc-900 border border-zinc-800 p-0 min-w-[340px] shadow-2xl shadow-black'):
-                
-                # Header
-                with ui.row().classes('w-full items-center justify-between p-4 border-b border-zinc-800 bg-zinc-900/50'):
-                    with ui.column().classes('gap-2'):
-                        ui.label('Inspect Runs').classes('text-xs font-bold text-zinc-500 uppercase tracking-wider')
-                        ui.label(f'[ {category_label} ]').classes(f'text-sm font-bold px-3 py-1 rounded-md border {txt_col} {bg_col} {border_col}')
-                
-                # Scrollable List
-                with ui.element('div').classes('w-full max-h-[350px] overflow-y-auto'):
-                    with ui.column().classes('w-full gap-0'): 
-                        for h in hash_list:
-                            act = self.db.get_activity_by_hash(h)
-                            if act:
-                                date_obj = pd.to_datetime(act.get('date'))
-                                nice_date = date_obj.strftime('%a, %-m/%-d')
-                                dist = act.get('distance_mi', 0)
-                                
-                                # --- THE PACE FIX ---
-                                # Calculate manually to avoid 0:00 errors
-                                duration_min = act.get('moving_time_min', 0)
-                                if dist > 0 and duration_min > 0:
-                                    pace = duration_min / dist
-                                    pace_fmt = f"{int(pace)}:{int((pace % 1) * 60):02d}"
-                                else:
-                                    # Fallback to DB string if calc fails
-                                    pace_fmt = act.get('pace', '--:--')
-                                # --------------------
-                                
-                                with ui.item().classes('w-full p-4 hover:bg-zinc-800 transition-colors border-b border-zinc-800/50 group') \
-                                        .props('clickable v-ripple') \
-                                        .on('click', lambda h=h: pick_run(h, selector_dialog)):
-                                    
-                                    with ui.row().classes('w-full justify-between items-center'):
-                                        with ui.row().classes('items-center gap-3'):
-                                            ui.label(nice_date).classes('text-zinc-300 font-medium text-sm w-20')
-                                            with ui.row().classes('items-center gap-1'):
-                                                ui.label('⏱️').classes('text-xs opacity-60')
-                                                ui.label(f'{pace_fmt}/mi').classes('text-zinc-500 text-xs')
-
-                                        with ui.row().classes('items-center gap-3'):
-                                            with ui.row().classes('items-center gap-1'):
-                                                ui.label('🏃‍♂️').classes('text-sm')
-                                                ui.label(f'{dist:.1f} mi').classes('text-white font-bold text-sm')
-                                            ui.icon('chevron_right').classes('text-zinc-600 group-hover:text-white transition-colors text-sm')
-
-                # Ghost Button Footer
-                with ui.row().classes('w-full p-3 bg-zinc-900/80 backdrop-blur-sm border-t border-zinc-800'):
-                    ui.button('CANCEL', on_click=selector_dialog.close).classes(
-                        'w-full bg-transparent border border-zinc-700 text-zinc-400 font-bold text-sm tracking-wide '
-                        'hover:text-white hover:border-zinc-500 hover:bg-zinc-800 transition-all duration-200 rounded-lg'
-                    )
-            
-            selector_dialog.open()
-                
-        except Exception as ex:
-            print(f"Click Error: {ex}")
-
     async def copy_to_llm(self):
         """
         Copy activity data to clipboard with LLM context.
