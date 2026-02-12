@@ -9,7 +9,7 @@ import json
 import hashlib
 import sqlite3
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Third-party imports
 import pandas as pd
@@ -135,13 +135,12 @@ def calculate_file_hash(filepath):
             buf = f.read(65536)
     return hasher.hexdigest()
 
-
-# --- HELPER: FORM ANALYSIS (Centralized Logic) ---
 # --- HELPER: FORM ANALYSIS (Centralized Logic) ---
 def analyze_form(cadence, gct=None, stride=None, bounce=None):
     """
     Analyze running form and return verdict, color, icon, and prescription.
     Used for single-point diagnosis (Tooltips, Run Summary).
+    UPDATED: Better thresholds for mixed run/walk activities.
     """
     # Default Result
     res = {
@@ -202,8 +201,8 @@ def analyze_form(cadence, gct=None, stride=None, bounce=None):
             'icon': 'check_circle',
             'prescription': 'Balanced mechanics. Solid turnover.'
         })
-    # The "Structural" Zone (Hiking/Walking) - NEW
-    elif cadence < 130:
+    # The "Structural" Zone (Widened to 135 to catch recovery jogs/walks)
+    elif cadence < 135:
         res.update({
             'verdict': 'HIKING / REST',
             'color': 'text-blue-400',
@@ -211,16 +210,17 @@ def analyze_form(cadence, gct=None, stride=None, bounce=None):
             'icon': 'hiking',
             'prescription': 'Power hiking or recovery interval.'
         })
-    # The "Danger" Zone
-    elif cadence < 150:
+    # The "Grey Area" (Renamed from Overstriding to Heavy Feet)
+    # Captures the 135-154 range which is typical for tired jogging
+    elif cadence < 155:
         res.update({
-            'verdict': 'OVERSTRIDING',
-            'color': 'text-red-400',
-            'bg': 'border-red-500/30',
+            'verdict': 'HEAVY FEET', 
+            'color': 'text-orange-400',
+            'bg': 'border-orange-500/30',
             'icon': 'warning',
-            'prescription': 'Cadence is low (<150). Focus on shorter, quicker steps.'
+            'prescription': 'Cadence is low. Focus on quick turnover.'
         })
-    # The "Meh" Zone
+    # The "Meh" Zone (155-159)
     else:
         res.update({
             'verdict': 'PLODDING',
@@ -234,12 +234,8 @@ def analyze_form(cadence, gct=None, stride=None, bounce=None):
 
 def classify_split(cadence, hr, max_hr, grade):
     """
-    Classify a single split (mile/lap) into 3 Buckets based on the 'Ultra Trinity':
-    1. Terrain (Grade)
-    2. Metabolic Cost (HR)
-    3. Mechanics (Cadence)
-    
-    Returns: 'HIGH QUALITY', 'STRUCTURAL', or 'BROKEN'
+    Classify a single split (mile/lap) into 3 Buckets.
+    UPDATED: Smarter handling of Recovery/Walking intervals.
     """
     # Safety defaults
     cadence = cadence or 0
@@ -247,25 +243,24 @@ def classify_split(cadence, hr, max_hr, grade):
     max_hr = max_hr or 185
     grade = grade or 0
     
-    z2_limit = max_hr * 0.78  # Approx aerobic threshold
+    z2_limit = max_hr * 0.78
     
-    # GATE 1: TERRAIN (The Climb)
-    # If steep (>8%) or very slow cadence (hiking), it's valid volume.
-    if grade > 8 or cadence < 130:
+    # GATE 1: TERRAIN & RECOVERY (The Base)
+    # If steep grade (>8%) OR low cadence (<140), it's Structural/Recovery.
+    # <140 catches walking breaks and slow recovery jogs.
+    if grade > 8 or cadence < 140:
         return 'STRUCTURAL'
         
-    # GATE 2: METABOLIC (The Recovery)
-    # If HR is low, mechanics don't matter. It's recovery volume.
+    # GATE 2: METABOLIC (The Easy Miles)
     if hr > 0 and hr <= z2_limit:
         return 'STRUCTURAL'
         
     # GATE 3: PERFORMANCE (The Work)
-    # Running on flat ground with elevated HR. Form MUST be good.
+    # If you are running hard (High HR, Flat Ground)...
     if cadence >= 160:
         return 'HIGH QUALITY'  # Good mechanics
     else:
-        return 'BROKEN'   # Mechanical failure (High HR + Low Cadence)
-
+        return 'BROKEN'   # High HR + Low Cadence (140-159) = Mechanical Fade
 
 # --- MAIN APPLICATION CLASS ---
 class GarminAnalyzerApp:
@@ -387,7 +382,15 @@ class GarminAnalyzerApp:
 
                 for record in fitfile.get_messages("record"):
                     vals = record.get_values()
-                    timestamps.append(vals.get('timestamp'))
+                    
+                    # --- UTC TO LOCAL FIX ---
+                    ts = vals.get('timestamp')
+                    if ts:
+                        # Ensure we have the timezone module imported at top of file!
+                        ts = ts.replace(tzinfo=timezone.utc).astimezone()
+                    timestamps.append(ts)
+                    # ------------------------
+
                     hr_stream.append(vals.get('heart_rate'))
                     elevation_stream.append(
                         vals.get('enhanced_altitude') or vals.get('altitude')
@@ -403,16 +406,21 @@ class GarminAnalyzerApp:
                 for lap_msg in fitfile.get_messages("lap"):
                     vals = lap_msg.get_values()
                     
+                    # --- TIMEZONE FIX ---
+                    if vals.get('start_time'):
+                        vals['start_time'] = vals.get('start_time').replace(tzinfo=timezone.utc).astimezone()
+                    
+                    if vals.get('timestamp'):
+                        vals['timestamp'] = vals.get('timestamp').replace(tzinfo=timezone.utc).astimezone()
+                    # --------------------
+
                     # Calculate speed directly if enhanced_avg_speed is missing
-                    # This ensures consistency across different FIT file versions
                     total_distance = vals.get('total_distance')
                     total_timer_time = vals.get('total_timer_time')
                     
                     if total_distance and total_timer_time and total_timer_time > 0:
-                        # Force this calculation for consistency
                         avg_speed = total_distance / total_timer_time
                     else:
-                        # Fallback to enhanced_avg_speed or avg_speed if calculation not possible
                         avg_speed = vals.get('enhanced_avg_speed') or vals.get('avg_speed')
                     
                     lap_data.append({
@@ -424,6 +432,7 @@ class GarminAnalyzerApp:
                         'total_ascent': vals.get('total_ascent'),
                         'total_descent': vals.get('total_descent'),
                         'start_time': vals.get('start_time'),
+                        'timestamp': vals.get('timestamp'), # Added for GAP calculation
                         'total_elapsed_time': vals.get('total_elapsed_time')
                     })
                 
@@ -2391,7 +2400,7 @@ root.destroy()
             self.timeframe_select.props(remove='disable')
     
     def update_report_text(self):
-        """Update report with Beautiful Cards."""
+        """Update report with Beautiful Cards. Fully restored styling."""
         self.report_container.clear()
         
         if not self.activities_data:
@@ -2402,8 +2411,8 @@ root.destroy()
         # Calculate Average EF for context
         avg_ef = self.df['efficiency_factor'].mean() if self.df is not None else 0
         
-        # Calculate long run threshold (same as graph logic)
-        if len(self.df) >= 5:
+        # Calculate long run threshold
+        if self.df is not None and len(self.df) >= 5:
             long_run_threshold = self.df['distance_mi'].quantile(0.8)
         else:
             long_run_threshold = 10.0
@@ -2415,79 +2424,54 @@ root.destroy()
                 cost = d.get('decoupling', 0)
                 border_color = 'border-green-500' if cost <= 5 else 'border-red-500'
                 
-                # 2. Parse date string to human-readable format
-                # Input: "2026-02-05 21:10" -> Output: "Thu, Feb 5" and "9:10 PM"
+                # 2. Parse date string
                 date_str = d.get('date', '')
                 try:
                     from datetime import datetime
                     dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
-                    formatted_date = dt.strftime('%a, %b %-d')  # "Thu, Feb 5"
-                    formatted_time = dt.strftime('%-I:%M %p')   # "9:10 PM"
+                    formatted_date = dt.strftime('%a, %b %-d')
+                    formatted_time = dt.strftime('%-I:%M %p')
                 except:
-                    # Fallback if parsing fails
                     formatted_date = date_str
                     formatted_time = ''
                 
-                # 3. Classify run type using the same logic as the graph
+                # 3. Classify run type
                 run_type_tag = self.classify_run_type(d, long_run_threshold)
                 
-                # 3.5. Calculate Strain Score (Exponential Method)
-                moving_time_min = d.get('moving_time_min', 0)  # Already in minutes
+                # 3.5. Calculate Strain Score
+                moving_time_min = d.get('moving_time_min', 0)
                 avg_hr = d.get('avg_hr', 0)
-                max_hr = d.get('max_hr', 185)  # Default to 185 if missing
+                max_hr = d.get('max_hr', 185)
                 
-                # Calculate intensity ratio
                 intensity = avg_hr / max_hr if max_hr > 0 else 0
                 
-                # Determine suffer factor based on HR zones
-                if intensity < 0.65:
-                    factor = 1.0  # Z1/Z2 - Easy
-                elif intensity < 0.75:
-                    factor = 1.5  # Aerobic
-                elif intensity < 0.85:
-                    factor = 3.0  # Tempo
-                elif intensity < 0.92:
-                    factor = 6.0  # Threshold
-                else:
-                    factor = 10.0  # Max
+                if intensity < 0.65: factor = 1.0
+                elif intensity < 0.75: factor = 1.5
+                elif intensity < 0.85: factor = 3.0
+                elif intensity < 0.92: factor = 6.0
+                else: factor = 10.0
                 
-                # Calculate strain score
                 strain = int(moving_time_min * factor)
                 
-                # Determine label and color based on strain
                 if strain < 75:
-                    strain_label = "Recovery"
-                    strain_color = "blue"
-                    strain_text_color = "#60a5fa"  # Lighter blue for better readability
-                    strain_description = "Easy effort that promotes adaptation and recovery."
+                    strain_label, strain_color, strain_text_color = "Recovery", "blue", "#60a5fa"
                 elif strain < 150:
-                    strain_label = "Maintenance"
-                    strain_color = "#10B981"  # Modern emerald green
-                    strain_text_color = "#10B981"  # Modern emerald green for consistency
-                    strain_description = "Steady training that maintains your current fitness level."
+                    strain_label, strain_color, strain_text_color = "Maintenance", "#10B981", "#10B981"
                 elif strain < 300:
-                    strain_label = "Productive"
-                    strain_color = "orange"
-                    strain_text_color = "orange"  # Orange is already readable
-                    strain_description = "Hard work that builds fitness and improves performance."
+                    strain_label, strain_color, strain_text_color = "Productive", "orange", "orange"
                 else:
-                    strain_label = "Overreaching"
-                    strain_color = "red"
-                    strain_text_color = "red"  # Red is already readable
-                    strain_description = "Very high stress that requires adequate recovery time."
+                    strain_label, strain_color, strain_text_color = "Overreaching", "red", "red"
                 
-                # 4. Create the "Hot Card" - entire card is clickable with hover effects
+                # 4. Create the "Hot Card" with user-preferred shadow settings
                 activity_hash = d.get('db_hash')
                 card = ui.card().classes(
                     'w-full p-4 bg-zinc-900 border border-zinc-800 '
                     'cursor-pointer relative overflow-hidden group '
                     'transform transition-all duration-300 ease-out '
                     'shadow-lg rounded-xl ' 
-                    'hover:border-zinc-500 hover:shadow-[0_20px_50px_rgba(0,0,0,0.9)] hover:-translate-y-1 hover:bg-zinc-800'
+                    'hover:border-zinc-500 hover:shadow-[0_7px_17px_rgba(0,0,0,0.9)] hover:-translate-y-1 hover:bg-zinc-800'
                 )
-                card.style('border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);')
                 
-                # Make entire card clickable to open detail modal (from_feed=True)
                 if activity_hash:
                     card.on('click', lambda h=activity_hash: self.open_activity_detail_modal(h, from_feed=True))
                 
@@ -2495,31 +2479,21 @@ root.destroy()
                     with ui.column().classes('w-full gap-1'):
                         # --- ROW 1: Header & Calories ---
                         with ui.row().classes('w-full justify-between items-start'):
-                            # LEFT: Title & Time
                             with ui.column().classes('gap-0'):
                                 ui.label(formatted_date).classes('font-bold text-zinc-200 text-sm group-hover:text-white transition-colors')
                                 ui.label(formatted_time).classes('text-xs text-zinc-500 group-hover:text-zinc-400 transition-colors')
                             
-                            # RIGHT: Calories
                             if d.get('calories'):
                                 with ui.row().classes('items-center gap-3 text-xs text-zinc-300 bg-zinc-800/50 px-2 py-1 rounded border border-zinc-700/50 group-hover:bg-zinc-700 transition-colors'):
                                     with ui.row().classes('items-center gap-1'):
                                         ui.icon('local_fire_department').classes('text-xs text-orange-400')
                                         ui.label(f"{d['calories']} cal")
                         
-                        # --- ROW 2: Context Tags (Left Aligned) ---
+                        # --- ROW 2: Context Tags (FIXED: Duplicates Removed) ---
                         with ui.row().classes('w-full items-center gap-2 mt-2'):
-                            # 1. Terrain Tag (Our "Hilly" Logic)
                             for tag in run_type_tag.split(' | '):
                                 ui.label(tag).classes('text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 tracking-wide')
                             
-                            # --- ROW 2: Context Tags ---
-                        with ui.row().classes('w-full items-center gap-2 mt-2'):
-                            # Terrain Tag
-                            for tag in run_type_tag.split(' | '):
-                                ui.label(tag).classes('text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 tracking-wide')
-                            
-                            # Physio Tag
                             if d.get('te_label'):
                                 te_color = d.get('te_label_color', 'text-zinc-400')
                                 if 'text-purple-400' in te_color: bg_color, border_color = 'bg-purple-500/10', 'border-purple-500/30'
@@ -2584,10 +2558,9 @@ root.destroy()
                                     ui.label('LOAD:').classes('text-xs text-zinc-300 font-bold uppercase tracking-widest')
                                     ui.label(strain_label).classes(f'text-sm font-bold').style(f'color: {strain_text_color};')
 
-                        # --- ROW 4: Footer - CLEANED UP (Removed Max HR & Max Speed) ---
+                        # --- ROW 4: Footer ---
                         ui.separator().classes('my-1').style('background-color: #52525b; height: 1px;')
                         with ui.row().classes('w-full justify-between items-center'):
-                            # Left: Essential Stats Only (Reduced Clutter)
                             with ui.row().classes('gap-6'):
                                 # Avg HR
                                 with ui.column().classes('items-center gap-0'):
@@ -2603,13 +2576,8 @@ root.destroy()
                                         ui.icon('directions_run').classes('text-blue-400 text-sm')
                                         ui.label(f"{d.get('avg_cadence', 0)}").classes('text-sm font-bold text-white')
                             
-                            # Right: Form Status Indicator
-                            form = analyze_form(
-                                d.get('avg_cadence'),
-                                d.get('avg_stance_time'),
-                                d.get('avg_step_length'),
-                                d.get('avg_vertical_oscillation')
-                            )
+                            # Right: Form Status Pill
+                            form = analyze_form(d.get('avg_cadence'), d.get('avg_stance_time'), d.get('avg_step_length'), d.get('avg_vertical_oscillation'))
                             if form['verdict'] != 'ANALYZING':
                                 if form['verdict'] in ['ELITE FORM', 'GOOD FORM']:
                                     pill_bg, pill_border, pill_text = 'bg-emerald-500/10', 'border-emerald-700/30', 'text-emerald-400'
@@ -2994,14 +2962,6 @@ Activity Breakdown: {activity_breakdown}
     def update_activities_grid(self):
         """
         Update activities table with native NiceGUI table component.
-        
-        This method:
-        - Clears grid container
-        - Checks if activities_data is empty
-        - Creates responsive table with inline delete buttons
-        - Uses flex layout for responsive columns
-        
-        Requirements: 5.2, 5.3, 12.6
         """
         # Clear grid container
         self.grid_container.clear()
@@ -3013,10 +2973,10 @@ Activity Breakdown: {activity_breakdown}
                     'text-center text-gray-400 mt-20'
                 )
             return
-        
-        # Define columns with responsive flex layout
+
+        # --- 1. PREPARE COLUMNS ---
         columns = [
-            {'name': 'date', 'label': 'Date', 'field': 'date', 'align': 'left', 'sortable': True},
+            {'name': 'date', 'label': 'Date', 'field': 'date_sort', 'align': 'left', 'sortable': True},
             {'name': 'filename', 'label': 'Filename', 'field': 'filename', 'align': 'left', 'sortable': True},
             {'name': 'distance', 'label': 'Dist', 'field': 'distance', 'align': 'left', 'sortable': True},
             {'name': 'elevation', 'label': 'Elev', 'field': 'elevation', 'align': 'left', 'sortable': True},
@@ -3026,12 +2986,39 @@ Activity Breakdown: {activity_breakdown}
             {'name': 'actions', 'label': '', 'field': 'actions', 'align': 'center'},
         ]
         
-        # Transform activities into row data
+        # --- 2. HELPER: SYSTEM TIMEZONE ---
+        import time
+        # Get local timezone abbreviation (e.g., EST, PDT)
+        system_tz = time.tzname[time.daylight]
+
+        # --- 3. TRANSFORM DATA ---
         rows = []
         for act in self.activities_data:
             cost = act.get('decoupling', 0)
+            
+            # --- DATE FORMATTING LOGIC ---
+            raw_date = act.get('date', '') # e.g. "2026-02-22 17:06"
+            try:
+                dt = datetime.strptime(raw_date, '%Y-%m-%d %H:%M')
+                
+                # Manual formatting for cross-platform consistency
+                hour = dt.strftime('%I').lstrip('0')
+                minute = dt.strftime('%M')
+                am_pm = dt.strftime('%p')
+                month = dt.strftime('%m').lstrip('0')
+                day = dt.strftime('%d').lstrip('0')
+                year = dt.strftime('%Y')
+                weekday = dt.strftime('%a')
+                
+                # FIXED: Added space before {system_tz}
+                # Result: "Thu, 4/25/2026 5:06PM EDT"
+                nice_date = f"{weekday}, {month}/{day}/{year} {hour}:{minute}{am_pm} {system_tz}"
+            except:
+                nice_date = raw_date
+
             rows.append({
-                'date': act.get('date', '')[:10],
+                'date_sort': raw_date,      # ISO format for sorting
+                'date_display': nice_date,  # Human format for display
                 'filename': act.get('filename', '')[:30],
                 'distance': f"{act.get('distance_mi', 0):.1f} mi",
                 'elevation': f"{act.get('elevation_ft', 0)} ft",
@@ -3043,9 +3030,8 @@ Activity Breakdown: {activity_breakdown}
                 'full_filename': act.get('filename', ''),
             })
         
-        # Create table with custom styling
+        # --- 4. RENDER TABLE ---
         with self.grid_container:
-            # Wrap table in a card-like container with rounded corners
             with ui.card().classes('w-full bg-zinc-900 p-4 border-0').style('border-radius: 8px; overflow: hidden; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
                 table = ui.table(
                     columns=columns,
@@ -3053,31 +3039,29 @@ Activity Breakdown: {activity_breakdown}
                     row_key='hash'
                 ).classes('w-full h-full')
                 
-                # Add custom slot for the actions column with eye icon and delete button
+                # --- SLOT: DATE (Two-line stack) ---
+                table.add_slot('body-cell-date', '''
+                    <q-td :props="props">
+                        <div class="flex flex-col">
+                            <span class="font-bold text-gray-200" style="font-size: 0.9rem;">
+                                {{ props.row.date_display.split(', ')[0] }}, {{ props.row.date_display.split(', ')[1].split(' ')[0] }}
+                            </span>
+                            <span class="text-xs text-zinc-500 font-mono">
+                                {{ props.row.date_display.split(' ')[2] }}{{ props.row.date_display.split(' ')[3] }} {{ props.row.date_display.split(' ')[4] }}
+                            </span>
+                        </div>
+                    </q-td>
+                ''')
+
+                # --- SLOT: ACTIONS (With RESTORED CSS classes) ---
                 table.add_slot('body-cell-actions', '''
                     <q-td :props="props">
-                        <q-btn 
-                            flat 
-                            dense 
-                            round 
-                            icon="visibility" 
-                            size="sm"
-                            class="view-btn"
-                            @click="$parent.$emit('view-row', props.row)"
-                        />
-                        <q-btn 
-                            flat 
-                            dense 
-                            round 
-                            icon="delete" 
-                            size="sm"
-                            class="delete-btn"
-                            @click="$parent.$emit('delete-row', props.row)"
-                        />
+                        <q-btn flat dense round icon="visibility" size="sm" class="view-btn" @click="$parent.$emit('view-row', props.row)"/>
+                        <q-btn flat dense round icon="delete" size="sm" class="delete-btn" @click="$parent.$emit('delete-row', props.row)"/>
                     </q-td>
                 ''')
                 
-                # Add custom slot for cost column with color coding
+                # --- SLOT: COST (Conditional Coloring) ---
                 table.add_slot('body-cell-cost', '''
                     <q-td :props="props">
                         <span :style="props.row.cost_value > 5 ? 'color: #ff4d4d; font-weight: 600;' : 'color: #10B981; font-weight: 600;'">
@@ -3086,15 +3070,13 @@ Activity Breakdown: {activity_breakdown}
                     </q-td>
                 ''')
                 
-                # Handle view and delete button clicks
                 table.on('view-row', lambda e: self.open_activity_detail_modal(e.args['hash'], from_feed=True))
                 table.on('delete-row', lambda e: self.delete_activity_inline(e.args['hash'], e.args['full_filename']))
                 
-                # Apply dark theme styling
                 table.props('flat bordered dense dark')
                 table.classes('bg-zinc-900 text-gray-200')
-            
-            # Add custom CSS for better styling
+
+            # --- RESTORED CSS FOR HOVER EFFECTS ---
             ui.add_head_html('''
             <style>
             .q-table thead tr, .q-table tbody td {
@@ -3113,18 +3095,18 @@ Activity Breakdown: {activity_breakdown}
             .q-table tbody tr:hover {
                 background-color: #252525 !important;
             }
-            /* Delete button styling - override all Quasar defaults */
+            /* RESTORED: Ghost button styling */
             .delete-btn.q-btn, .view-btn.q-btn {
                 opacity: 0.3 !important;
-                transition: all 0.15s ease !important;
+                transition: all 0.2s ease !important;
             }
             .delete-btn.q-btn .q-icon, .view-btn.q-btn .q-icon {
                 color: #9ca3af !important;
-                transition: color 0.15s ease !important;
             }
             .delete-btn.q-btn:hover, .view-btn.q-btn:hover {
                 opacity: 1 !important;
                 background-color: rgba(255, 255, 255, 0.1) !important;
+                transform: scale(1.1);
             }
             .delete-btn.q-btn:hover .q-icon, .view-btn.q-btn:hover .q-icon {
                 color: #ffffff !important;
@@ -3132,10 +3114,6 @@ Activity Breakdown: {activity_breakdown}
             /* Disable Quasar's default hover overlay */
             .delete-btn.q-btn:before, .view-btn.q-btn:before {
                 display: none !important;
-            }
-            /* Ensure no color changes after hover */
-            .delete-btn.q-btn:not(:hover) .q-icon, .view-btn.q-btn:not(:hover) .q-icon {
-                color: #9ca3af !important;
             }
             </style>
             ''')
@@ -3262,68 +3240,44 @@ Activity Breakdown: {activity_breakdown}
     
     def classify_run_type(self, run_data, long_run_threshold):
         """
-        Stackable classification system: Primary Category + Attributes.
-        
-        Args:
-            run_data: Dictionary with run metrics
-            long_run_threshold: Distance threshold for long runs (80th percentile)
-            
-        Returns:
-            str: Formatted tag string like "🦅 Long Run | ⛰️ Hilly | 🥵 Hot"
+        Stackable classification system.
+        Uses burst_count to distinguish true workouts from speed outliers.
         """
         tags = []
         
-        # Extract metrics
+        # 1. Existing metric extraction
         distance_mi = run_data.get('distance_mi', 0)
         avg_hr = run_data.get('avg_hr', 0)
-        max_hr = run_data.get('max_hr', 185)  # Default to 185 if missing
+        max_hr = run_data.get('max_hr', 185)
         elevation_ft = run_data.get('elevation_ft', 0)
-        max_speed_mph = run_data.get('max_speed_mph', 0)
-        avg_speed_mph = run_data.get('avg_speed_mph', 0)
-        avg_temp = run_data.get('avg_temp', 15)  # Default to moderate temp
+        avg_temp = run_data.get('avg_temp', 0)
+        burst_count = run_data.get('burst_count', 0) # GET THE COUNT
         
-        # Calculate HR ratio
         hr_ratio = avg_hr / max_hr if max_hr > 0 else 0
-        
-        # Calculate grade (ft/mi)
         grade = (elevation_ft / distance_mi) if distance_mi > 0 else 0
         
-        # --- A. Determine Primary Category (Mutually Exclusive) ---
-        # Priority: Long > Recovery > Tempo > Steady > Base
-        if distance_mi > long_run_threshold:
-            primary = "🦅 Long Run"
-        elif distance_mi < 4.0 and hr_ratio < 0.75:
-            primary = "🧘 Recovery"
-        elif hr_ratio > 0.82:
-            primary = "🔥 Tempo"
-        elif hr_ratio > 0.75:
-            primary = "🔷 Steady"
-        else:
-            primary = "🟡 Base"
-        
+        # --- A. Primary Category ---
+        if distance_mi > long_run_threshold: primary = "🦅 Long Run"
+        elif distance_mi < 4.0 and hr_ratio < 0.75: primary = "🧘 Recovery"
+        elif hr_ratio > 0.82: primary = "🔥 Tempo"
+        elif hr_ratio > 0.75: primary = "🔷 Steady"
+        else: primary = "🟡 Base"
         tags.append(primary)
         
-        # --- B. Check Attributes (Additive) ---
-        # 1. Hills
-        is_hilly = grade > 75
-        if is_hilly:
-            tags.append("⛰️ Hilly")
+        # --- B. Attributes ---
+        if grade > 75: tags.append("⛰️ Hilly")
         
-        # 2. Speed / Strides (Context-Aware)
-        # Smart Interval Detection: Lower threshold for hilly runs
-        # Hill sprints have high HR but lower speed variance due to gravity
-        speed_threshold = 1.25 if is_hilly else 1.5
-        if avg_speed_mph > 0 and (max_speed_mph / avg_speed_mph) > speed_threshold:
-            tags.append("⚡ w/ Speed")
+        # --- C. The New Interval Logic ---
+        # Only tag as Intervals if we saw 3 or more sustained bursts
+        if burst_count >= 4:
+            tags.append("⚡ Intervals")
+        elif burst_count >= 2:
+            # Optional: Add a tag for short speed work like Strides
+            tags.append("💨 Strides")
+            
+        if avg_temp and avg_temp > 25: tags.append("🥵 Hot")
+        elif avg_temp and avg_temp < 5: tags.append("🥶 Cold")
         
-        # 3. Weather (only if we have valid temperature data)
-        if avg_temp and avg_temp > 0:  # Only apply tags if we have real temperature data
-            if avg_temp > 25:
-                tags.append("🥵 Hot")
-            elif avg_temp < 5:  # Raised threshold from 2°C to 5°C (41°F)
-                tags.append("🥶 Cold")
-        
-        # --- C. Format the Final String ---
         return " | ".join(tags)
     
     def generate_weekly_volume_chart(self):
@@ -4316,7 +4270,7 @@ Activity Breakdown: {activity_breakdown}
                             ui.label('Training Volume').classes('text-xl font-bold text-white')
                             self.volume_verdict_label = ui.label(f'[ {vol_verdict} ]').classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}').style(f'color: {vol_color};')
                             
-                        ui.label('Breakdown in quality of miles').classes('text-sm text-zinc-400 mb-4')
+                        ui.label('Breakdown in quality of miles (click any section to inspect runs)').classes('text-sm text-zinc-400 mb-4')
                         
                         # Chart with zoom binding
                         self.volume_chart = ui.plotly(volume_fig).classes('w-full').style('cursor: pointer')
@@ -5223,7 +5177,14 @@ def _parse_fit_files_for_clipboard(activity_info_list):
             timestamps = []
             for record in fitfile.get_messages("record"):
                 vals = record.get_values()
-                timestamps.append(vals.get('timestamp'))
+                
+                # --- UTC TO LOCAL FIX ---
+                ts = vals.get('timestamp')
+                if ts:
+                    ts = ts.replace(tzinfo=timezone.utc).astimezone()
+                timestamps.append(ts)
+                # ------------------------
+
                 elevation_stream.append(
                     vals.get('enhanced_altitude') or vals.get('altitude')
                 )

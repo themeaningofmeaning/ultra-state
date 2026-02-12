@@ -7,7 +7,7 @@ import fitparse
 import pandas as pd
 import numpy as np
 from scipy.signal import find_peaks
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 import os
 
@@ -93,6 +93,13 @@ class FitAnalyzer:
         # 1. Check Session Messages (Official Summary)
         for msg in fitfile.get_messages("session"):
             vals = msg.get_values()
+            
+            # --- TIMEZONE FIX: Capture and Convert Start Time ---
+            if vals.get('start_time'):
+                # Convert Naive UTC -> Local System Time
+                start_time = vals.get('start_time').replace(tzinfo=timezone.utc).astimezone()
+            # ----------------------------------------------------
+
             # Basic Speed/Ascent/HR (Existing)
             if 'enhanced_max_speed' in vals: 
                 session_max_speed = vals.get('enhanced_max_speed') or 0.0
@@ -284,12 +291,42 @@ class FitAnalyzer:
             metadata.get('total_training_effect'), 
             metadata.get('total_anaerobic_training_effect')
         )
+
+        # --- 8.. BURST DETECTION (Section 3.1) ---
+        # 1. Define 'High Speed' as 30% faster than average moving speed
+        # Use gap_speed if available (to capture uphill sprints and ignore downhill bombing)
+        # Fallback to raw speed if altitude data is missing.
+        speed_col = 'gap_speed' if 'gap_speed' in df_active.columns else 'speed'
+        
+        avg_val = df_active[speed_col].mean()
+        burst_threshold = avg_val * 1.3 # 30% intensity jump
+
+        # 2. Count sustained bursts (8+ seconds of continuous high speed)
+        is_burst = df_active['speed'] > burst_threshold
+        burst_count = 0
+        current_streak = 0
+        
+        for above_limit in is_burst:
+            if above_limit:
+                current_streak += 1
+            else:
+                if current_streak >= 8: # 8-second sprint window
+                    burst_count += 1
+                current_streak = 0
+        
+        # Catch a burst finishing at the end of the file
+        if current_streak >= 8:
+            burst_count += 1
         
         return {
             'filename': os.path.basename(filename),
+            'filename': os.path.basename(filename),
+            'timestamp_utc': int(start_time.timestamp()),
             'date': start_time.strftime('%Y-%m-%d %H:%M'),
             'distance_mi': round(df['dist'].max() * 0.000621371, 2),
             'pace': pace_str,
+            'avg_speed_mph': round(df_active['speed'].mean() * 2.23694, 2),
+            'burst_count': burst_count,
             'gap_pace': avg_gap_pace_str,
             'avg_hr': int(avg_hr) if not pd.isna(avg_hr) else 0,
             'max_hr': int(max_hr),
