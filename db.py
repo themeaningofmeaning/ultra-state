@@ -142,7 +142,7 @@ class DatabaseManager:
         # Validate order
         order_sql = "ASC" if sort_order == "asc" else "DESC"
 
-        query = f"SELECT json_data, hash FROM activities"
+        query = f"SELECT json_data, hash, file_path FROM activities"
         params = []
         
         # --- Timeframe Filtering ---
@@ -175,6 +175,8 @@ class DatabaseManager:
             for row in rows:
                 d = json.loads(row[0])
                 d['db_hash'] = row[1]
+                # Explicitly capture the file_path from the query result
+                d['file_path'] = row[2] 
                 results.append(d)
             return results
 

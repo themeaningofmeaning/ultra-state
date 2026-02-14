@@ -37,6 +37,32 @@ class GarminAnalyzerApp:
         self.activities_data = []
         self.df = None
         self.import_in_progress = False
+        self.focus_mode_active = False
+        self._entering_focus_mode = False
+        self.activities_table = None
+        self.active_filters = set()
+        self.volume_lens = 'quality'  # 'quality', 'mix', 'load'
+        self.volume_card_container = None  # for surgical card refresh
+
+        # Define taxonomy of filter tags
+        self.TAG_CONFIG = {
+            # CONTEXT TAGS
+            'Long Run':   {'icon': '🏃', 'color': 'purple'},
+            'Tempo':      {'icon': '🔥', 'color': 'orange'},
+            'Intervals':  {'icon': '⚡', 'color': 'orange'},
+            'Hill Sprints': {'icon': '⛰️', 'color': 'emerald'},
+            'Hills':      {'icon': '⛰️', 'color': 'emerald'},
+            'Recovery':   {'icon': '🧘', 'color': 'blue'},
+            'Base':       {'icon': '🔷', 'color': 'blue'},
+            'Fartlek':    {'icon': '💨', 'color': 'orange'},
+            'Steady':     {'icon': '⚓', 'color': 'cyan'},
+            
+            # PHYSIO TAGS
+            'VO2 MAX':    {'icon': '🫀', 'color': 'fuchsia'},
+            'ANAEROBIC':  {'icon': '🔋', 'color': 'orange'},
+            'THRESHOLD':  {'icon': '📈', 'color': 'emerald'},
+            'MAX POWER':  {'icon': '🚀', 'color': 'purple'},
+            }
 
         # Initialize the volume data container
         self.weekly_volume_data = None
@@ -49,6 +75,8 @@ class GarminAnalyzerApp:
         
         # Show Save Chart button initially with fade (Trends tab is default)
         ui.timer(0.05, lambda: self.save_chart_btn.style('opacity: 1; pointer-events: auto;'), once=True)
+
+
     def _locate_fit_file(self, activity):
         """
         Locate FIT file on disk for an activity.
@@ -795,13 +823,13 @@ class GarminAnalyzerApp:
         """
         import plotly.graph_objects as go
 
-        # Define color palette (emerald green gradient)
+        # Define color palette (unified with trends HR Zones lens)
         colors = [
-            '#064e3b',  # Zone 1 - Dark green
-            '#047857',  # Zone 2 - Medium green
-            '#10B981',  # Zone 3 - Bright emerald
-            '#ff9900',  # Zone 4 - Orange
-            '#ff4d4d'   # Zone 5 - Red
+            '#60a5fa',  # Zone 1 - Blue (easy/warmup)
+            '#34d399',  # Zone 2 - Emerald (aerobic base)
+            '#fbbf24',  # Zone 3 - Amber (threshold/gray zone)
+            '#f97316',  # Zone 4 - Orange (hard)
+            '#ef4444'   # Zone 5 - Red (max effort)
         ]
 
         # Create horizontal bar chart
@@ -1069,7 +1097,7 @@ class GarminAnalyzerApp:
                             'text-blue-400': props.value === 'STRUCTURAL',
                             'text-red-400': props.value === 'BROKEN'
                         }">
-                        {{ props.value === 'HIGH QUALITY' ? 'Quality' : props.value === 'STRUCTURAL' ? 'Base' : 'Broken' }}
+                        {{ props.value === 'HIGH QUALITY' ? 'High Quality' : props.value === 'STRUCTURAL' ? 'Base' : 'Broken' }}
                     </span>
                 </div>
             </q-td>
@@ -1480,35 +1508,44 @@ class GarminAnalyzerApp:
 
         # --- QUALITY BADGE CALCULATION ---
         try:
-            cad = activity.get('avg_cadence', 0)
-            session = detail_data.get('session_data', {})
+            # 1. Gather Averages
+            avg_cad = activity.get('avg_cadence', 0)
+            avg_hr = activity.get('avg_hr', 0)
             
-            form_res = analyze_form(
-                cad or session.get('avg_cadence', 0),
-                session.get('avg_stance_time', 0),
-                session.get('avg_step_length', 0),
-                session.get('avg_vertical_oscillation', 0)
-            )
+            # Use the max_hr from the detailed parse if available, else DB
+            max_hr = detail_data.get('max_hr') or activity.get('max_hr', 185)
             
-            verdict_text = form_res['verdict']
+            # 2. Calculate Average Grade
+            dist_mi = activity.get('distance_mi', 0)
+            elev_ft = activity.get('elevation_ft', 0)
+            if dist_mi > 0:
+                # Rise (ft) / Run (ft) * 100
+                avg_grade = (elev_ft / (dist_mi * 5280)) * 100
+            else:
+                avg_grade = 0
             
-            # UPDATED: Full text, no brackets
-            if verdict_text in ['ELITE FORM', 'GOOD FORM']:
+            # 3. Use the SAME logic as the Chart (classify_split)
+            # This ensures Z2 runs are correctly labeled "Structural"
+            verdict_text = classify_split(avg_cad, avg_hr, max_hr, avg_grade)
+            
+            # 4. Map Verdict to Badge
+            if verdict_text == 'HIGH QUALITY':
                 v_label = 'HIGH QUALITY MILES' 
                 v_color = 'text-emerald-400'
                 v_bg = 'bg-emerald-500/20 border-emerald-500/30'
-            elif verdict_text in ['HIKING / REST', 'HIKING']:
+            elif verdict_text == 'STRUCTURAL':
                  v_label = 'STRUCTURAL MILES'
                  v_color = 'text-blue-400'
                  v_bg = 'bg-blue-500/20 border-blue-500/30'
-            elif verdict_text in ['PLODDING', 'LOW CADENCE', 'OVERSTRIDING', 'HEAVY FEET']:
+            elif verdict_text == 'BROKEN':
                 v_label = 'BROKEN MILES'
                 v_color = 'text-red-400'
                 v_bg = 'bg-red-500/20 border-red-500/30'
             else:
                 v_label = None
                 
-        except:
+        except Exception as e:
+            print(f"Badge Calc Error: {e}")
             v_label = None
         # -------------------------------
 
@@ -1605,98 +1642,98 @@ class GarminAnalyzerApp:
  
     def build_ui(self):
         """Construct the complete UI layout with fixed sidebar."""
-        # 1. CSS HACK: Hide Plotly Logo and notifications globally
+        
+        # 1. INTEGRATED CSS CONFIGURATION
         ui.add_head_html('''
         <style>
-        .modebar-btn--logo { display: none !important; }
-        /* Hide Plotly's "Double-click to zoom back out" notification */
-        .plotly .notifier { display: none !important; }
-        .js-plotly-plot .notifier { display: none !important; }
-        .notifier { display: none !important; }
+        /**************************************************/
+        /* 1. THE APPLE-STYLE HOVER FIX (DARK MODE)       */
+        /**************************************************/
         
-        /* Remove default page padding/margin to eliminate grey strips */
-        body, .q-page, .nicegui-content {
-            margin: 0 !important;
-            padding: 0 !important;
+        /* Disable Quasar's default 'ripple' overlay */
+        .q-btn.no-ripple .q-focus-helper {
+            display: none !important;
         }
         
-        /* Force light grey background everywhere for Apple-style contrast */
+        /* Manual hover state: Glassy highlight for Dark Mode */
+        /* Exclude filter-active buttons — they get their own hover below */
+        .q-btn.no-ripple:not(.filter-active):hover {
+            /* This creates a subtle lightening effect on dark backgrounds */
+            background-color: rgba(255, 255, 255, 0.1) !important; 
+            transition: background-color 0.2s ease;
+        }
+        
+        /* Active filter buttons: darken slightly on hover instead of whitening */
+        .q-btn.filter-active:hover {
+            filter: brightness(1.15) !important;
+            transition: filter 0.2s ease;
+        }
+        
+        /* Subtle tactile scale effect on click */
+        .q-btn.no-ripple:active {
+            transform: scale(0.97);
+        }
+
+        /**************************************************/
+        /* 2. PLOTLY & LAYOUT RESETS                      */
+        /**************************************************/
+        .modebar-btn--logo, .plotly .notifier, .js-plotly-plot .notifier { 
+            display: none !important; 
+        }
+        
+        body, .q-page, .nicegui-content { margin: 0 !important; padding: 0 !important; }
+        
         html, body, #app, .q-page-container, .q-page {
             background-color: #F5F5F7 !important;
         }
         
-        /* Prevent overscroll bounce on macOS native app */
-        html, body {
-            overscroll-behavior: none !important;
-            overflow: hidden !important;
-        }
+        html, body { overscroll-behavior: none !important; overflow: hidden !important; }
+        .q-page { overflow-y: auto !important; }
         
-        /* Allow scrolling only on main content */
-        .q-page {
-            overflow-y: auto !important;
-        }
-        
-        /* Toast notification animations */
+        /* Ensure table actions are clickable */
+        .q-table tbody td { position: relative; }
+
+        /**************************************************/
+        /* 3. TOAST NOTIFICATION ANIMATIONS (PRESERVED)   */
+        /**************************************************/
         @keyframes slideIn {
-            from {
-                transform: translateX(400px);
-                opacity: 0;
-            }
-            to {
-                transform: translateX(0);
-                opacity: 1;
-            }
+            from { transform: translateX(400px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
         }
         
         @keyframes slideOut {
-            from {
-                transform: translateX(0);
-                opacity: 1;
-            }
-            to {
-                transform: translateX(400px);
-                opacity: 0;
-            }
+            from { transform: translateX(0); opacity: 1; }
+            to { transform: translateX(400px); opacity: 0; }
         }
-        }
-        
-        /* Smooth carousel-style transitions - keep all panels rendered */
-        .q-tab-panels {
-            overflow: hidden;
-            position: relative;
-        }
-        
+
+        /**************************************************/
+        /* 4. TAB TRANSITIONS (PRESERVED)                 */
+        /**************************************************/
+        .q-tab-panels { overflow: hidden; position: relative; }
         .q-tab-panel {
-            transition: transform 0.8s cubic-bezier(0.16, 1, 0.3, 1) !important, opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1) !important;
+            transition: transform 0.8s cubic-bezier(0.16, 1, 0.3, 1) !important, 
+                        opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1) !important;
             will-change: transform, opacity;
         }
         
-        /* Force all panels to stay in DOM (prevent hide/show flash) */
         .q-tab-panel[aria-hidden="true"] {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            opacity: 0;
-            pointer-events: none;
-            transform: translateX(30px);
+            position: absolute; top: 0; left: 0; width: 100%;
+            opacity: 0; pointer-events: none; transform: translateX(30px);
         }
         
         .q-tab-panel[aria-hidden="false"] {
-            position: relative;
-            opacity: 1;
-            pointer-events: auto;
-            transform: translateX(0);
+            position: relative; opacity: 1; pointer-events: auto; transform: translateX(0);
         }
-        
-        /* Copy splits button styling - matches Activities table eye icon */
+
+        /**************************************************/
+        /* 5. COPY SPLITS BUTTON STYLING (PRESERVED)      */
+        /**************************************************/
         .copy-splits-btn.q-btn {
             opacity: 0.3 !important;
             transition: all 0.15s ease !important;
         }
         .copy-splits-btn.q-btn .q-icon {
             color: #9ca3af !important;
-            transition: color 0.15s ease !important;
         }
         .copy-splits-btn.q-btn:hover {
             opacity: 1 !important;
@@ -1705,53 +1742,28 @@ class GarminAnalyzerApp:
         .copy-splits-btn.q-btn:hover .q-icon {
             color: #ffffff !important;
         }
-        .copy-splits-btn.q-btn:before {
-            display: none !important;
-        }
-        .copy-splits-btn.q-btn:not(:hover) .q-icon {
-            color: #9ca3af !important;
-        }
+
+        /**************************************************/
+        /* 6. DROPDOWN & SELECT STYLING (PRESERVED)       */
+        /**************************************************/
+        .q-menu .q-item { color: white !important; background-color: #1F1F1F !important; }
+        .q-menu .q-item:hover { background-color: #2CC985 !important; }
+        .q-field__native, .q-field__input, .q-field__append .q-icon { color: white !important; }
+        .q-field--outlined .q-field__control:before { border-color: rgba(255, 255, 255, 0.3) !important; }
+        .q-field--outlined .q-field__control:hover:before { border-color: rgba(255, 255, 255, 0.6) !important; }
         </style>
         ''')
-        # Set light grey background for entire page (Apple style) with modern emerald accent
+        
+        # 2. COLOR SCHEME
         ui.colors(primary='#10B981', secondary='#1F1F1F', accent='#ff9900', 
                   dark='#F5F5F7', positive='#10B981', negative='#ff4d4d', 
                   info='#3b82f6', warning='#ff9900')
+        
         ui.query('body').classes('bg-gray-100').style('background-color: #F5F5F7;')
         
-        # Add custom CSS for dropdown styling
-        ui.add_head_html('''
-        <style>
-        /* Style dropdown options to be visible */
-        .q-menu .q-item {
-            color: white !important;
-            background-color: #1F1F1F !important;
-        }
-        .q-menu .q-item:hover {
-            background-color: #2CC985 !important;
-        }
-        /* Style the select input text and icon */
-        .q-field__native, .q-field__input {
-            color: white !important;
-        }
-        /* Style the dropdown arrow icon */
-        .q-field__append .q-icon {
-            color: white !important;
-        }
-        /* Style the select border */
-        .q-field--outlined .q-field__control:before {
-            border-color: rgba(255, 255, 255, 0.3) !important;
-        }
-        .q-field--outlined .q-field__control:hover:before {
-            border-color: rgba(255, 255, 255, 0.6) !important;
-        }
-        </style>
-        ''')
-        
+        # 3. MAIN LAYOUT
         with ui.row().classes('w-full h-screen m-0 p-0 gap-0 no-wrap overflow-hidden'):
-            # Fixed sidebar - stays in place
             self.build_sidebar()
-            # Scrollable main content area
             self.build_main_content()
     
     def build_sidebar(self):
@@ -1808,7 +1820,7 @@ class GarminAnalyzerApp:
     def build_main_content(self):
         """Create tabbed main content area with scrolling."""
         # Outer wrapper: No padding, flush to edges with light grey background
-        with ui.column().classes('flex-1 h-screen overflow-y-auto p-0 gap-0').style('background-color: #F5F5F7;'):
+        with ui.column().classes('flex-1 h-screen overflow-hidden p-0 gap-0').style('background-color: #F5F5F7;'):
             # Inner container: Adds padding for content breathing room (no bottom padding)
             with ui.column().classes('w-full min-h-full pt-6 px-6 pb-0 gap-4').style('background-color: #F5F5F7;'):
                 # Create tabs row with absolute positioned Save Chart button
@@ -1834,11 +1846,19 @@ class GarminAnalyzerApp:
                         self.build_report_tab()
                     
                     # Activities tab panel
-                    with ui.tab_panel(activities_tab).classes('p-0'):
+                    with ui.tab_panel(activities_tab).classes('p-0 h-full flex flex-col'):
                         self.build_activities_tab()
                 
                 # Show/hide Save Chart button based on active tab
                 tabs.on('update:model-value', lambda e: self.toggle_save_chart_button(e.args))
+
+        # Floating Action Bar (Lives at root level to float above everything)
+        self.fab_container = ui.row().classes(
+            'fixed bottom-8 left-1/2 transform -translate-x-1/2 ' # Centered at bottom
+            'bg-zinc-800/90 backdrop-blur-md text-white px-6 py-2 rounded-full '
+            'shadow-2xl border border-zinc-700 z-50 items-center gap-4 '
+            'transition-all duration-300 translate-y-[150%] opacity-0 pointer-events-none'
+        )
     
     def build_trends_tab(self):
         """Create trends tab with embedded Plotly chart."""
@@ -1859,44 +1879,224 @@ class GarminAnalyzerApp:
 
     
     def build_activities_tab(self):
-        """Create activities tab with AG Grid table."""
-        # Store the grid_container as an instance variable so it can be updated later
-        # by update_activities_grid() method (task 9.1)
-        self.grid_container = ui.column().classes('w-full').style('min-height: 800px; background-color: #F5F5F7;')
+        """Create activities tab with Filter, Table, and Floating Action Bar."""
+        # 1. Filter Bar
+        self.filter_container = ui.row().classes('w-full mb-2 gap-2')
         
-        # Initialize with placeholder
-        with self.grid_container:
-            ui.label('No activities found. Import activities to view data.').classes(
-                'text-center text-gray-600 mt-20'
+        # 2. Table
+        self.grid_container = ui.column().classes('w-full flex-1 overflow-hidden')
+        
+        # 3. Initial Render
+        self.update_filter_bar()
+        self.update_activities_grid()
+
+    def show_floating_action_bar(self, selected_rows):
+        """Shows the floating bar when rows are selected."""
+
+        # FIX: Explicit check for empty list
+        if not selected_rows or len(selected_rows) == 0:
+            self.hide_floating_action_bar()
+            return
+            
+        count = len(selected_rows)
+        self.fab_container.clear()
+        self.fab_container.classes(
+            remove='translate-y-[150%] opacity-0 pointer-events-none', 
+            add='translate-y-0 opacity-100 pointer-events-auto'
+        )
+        
+        with self.fab_container:
+            # COUNT BADGE — Emerald tint
+            with ui.element('div').classes(
+                'flex items-center justify-center rounded-full px-3 py-0.5 mr-1'
+            ).style('background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3);'):
+                ui.label(f"{count}").classes('font-bold text-base text-emerald-400')
+            ui.label('Selected').classes('text-sm text-zinc-400 mr-3 font-medium')
+            
+            # FOCUS BUTTON — Emerald accent, unified with brand
+            ui.button('Focus', icon='center_focus_strong', color=None,
+                      on_click=lambda: self.enter_focus_mode(selected_rows)
+            ).props('flat dense no-caps').classes(
+                'text-emerald-400 hover:text-emerald-300 font-semibold text-sm'
             )
+            
+            # SEPARATOR
+            ui.element('div').classes('w-px h-5 mx-1').style('background: rgba(255,255,255,0.1);')
+            
+            # DOWNLOAD — White icon
+            ui.button(icon='download', color=None,
+                      on_click=lambda: self.bulk_download(selected_rows)
+            ).props('flat round dense').classes('text-zinc-400 hover:text-white')
+            
+            # DELETE — Red on hover
+            ui.button(icon='delete_outline', color=None,
+                      on_click=lambda: self.bulk_delete(selected_rows)
+            ).props('flat round dense').classes('text-zinc-400 hover:text-red-400')
+
+    def hide_floating_action_bar(self):
+        """Hides the floating bar."""
+        self.fab_container.classes(
+            remove='translate-y-0 opacity-100 pointer-events-auto', 
+            add='translate-y-[150%] opacity-0 pointer-events-none'
+        )
+
+    def enter_focus_mode(self, selected_rows):
+        """Filters the ENTIRE APP to just these rows."""
+        # 1. Get the hashes (robustly)
+        hashes = []
+        for row in selected_rows:
+            if isinstance(row, dict):
+                # Grab the real DB hash we stored in the row
+                h = row.get('hash')
+                if h:
+                    hashes.append(h)
+            elif isinstance(row, str):
+                # If it's just a string ID, use it (unless it's a temp ID)
+                if not row.startswith('temp_'):
+                    hashes.append(row)
+        
+        # Safety check
+        if not hashes:
+            ui.notify("No valid activities selected", type='warning')
+            return
+
+        # 2. Filter the main data list in memory
+        self.activities_data = [act for act in self.activities_data if act.get('db_hash') in hashes]
+        
+        # 3. Update DataFrame (Critical for charts to work)
+        if self.activities_data:
+            self.df = pd.DataFrame(self.activities_data)
+            # Ensure date objects exist for the charts
+            if 'date' in self.df.columns:
+                 self.df['date_obj'] = pd.to_datetime(self.df['date'])
+        else:
+             self.df = None
+        
+        # 4. Update State
+        self.focus_mode_active = True
+        focus_label = f"🎯 Focus ({len(hashes)})"
+        self.current_timeframe = focus_label
+        
+        # 5. Inject Focus Mode into the dropdown and style it
+        # Guard flag prevents on_filter_change from immediately undoing our work
+        self._entering_focus_mode = True
+        current_options = list(self.timeframe_select.options)
+        if focus_label not in current_options:
+            current_options.append(focus_label)
+            self.timeframe_select.options = current_options
+        self.timeframe_select.value = focus_label
+        self._entering_focus_mode = False
+        # Add a neon glow to the dropdown so user knows they're in a special state
+        self.timeframe_select.style(add='border: 1px solid #34d399; box-shadow: 0 0 12px rgba(16, 185, 129, 0.4); border-radius: 8px;')
+        
+        # 6. Refresh All Views (Feed, Charts, and Table)
+        self.update_trends_chart()
+        self.update_report_text()
+        self.update_activities_grid()
+        
+        # 7. Hide the bar
+        self.hide_floating_action_bar()
+        ui.notify("Focus Mode — select a timeframe to exit", type='info', icon='center_focus_strong')
+
+    async def exit_focus_mode(self):
+        """Exit Focus Mode — restore original timeframe and reload data."""
+        self.focus_mode_active = False
+        
+        # Remove the Focus option from dropdown and restore styling
+        self._entering_focus_mode = True
+        current_options = [o for o in self.timeframe_select.options if not str(o).startswith('🎯')]
+        self.timeframe_select.options = current_options
+        self.timeframe_select.value = 'Last 30 Days'
+        self._entering_focus_mode = False
+        self.timeframe_select.style(remove='border: 1px solid #34d399; box-shadow: 0 0 12px rgba(16, 185, 129, 0.4); border-radius: 8px;')
+        
+        # Update timeframe and reload data
+        self.current_timeframe = 'Last 30 Days'
+        await self.refresh_data_view()
+        ui.notify("Exited Focus Mode", type='info', icon='zoom_out')
+
+    async def bulk_download(self, rows):
+        """Download FIT files for all selected rows to ~/Downloads."""
+        import shutil
+        count = 0
+        errors = 0
+        for row in rows:
+            try:
+                if isinstance(row, dict):
+                    source = row.get('file_path', '')
+                    if not source:
+                        print(f"DEBUG bulk_download: no file_path in row {row.get('id', '?')}")
+                        errors += 1
+                        continue
+                    if not os.path.exists(source):
+                        print(f"DEBUG bulk_download: file not found: {source}")
+                        errors += 1
+                        continue
+                    dest = os.path.join(os.path.expanduser('~/Downloads'), os.path.basename(source))
+                    shutil.copy2(source, dest)
+                    count += 1
+            except Exception as ex:
+                print(f"DEBUG bulk_download error: {ex}")
+                errors += 1
+        # Clear selection and hide FAB
+        if hasattr(self, 'activities_table') and self.activities_table:
+            self.activities_table.selected.clear()
+            self.activities_table.update()
+        self.hide_floating_action_bar()
+        if count > 0:
+            ui.notify(f"Saved {count} file{'s' if count != 1 else ''} to Downloads", type='positive', icon='download')
+        if errors > 0:
+            ui.notify(f"{errors} file{'s' if errors != 1 else ''} could not be downloaded", type='warning')
+
+    async def bulk_delete(self, rows):
+        """Delete all selected activities after confirmation."""
+        count = len(rows)
+        word = "activities" if count > 1 else "activity"
+        result = await ui.run_javascript(
+            f'confirm("Delete {count} {word}?")',
+            timeout=10
+        )
+        if result:
+            deleted = 0
+            for row in rows:
+                if isinstance(row, dict):
+                    h = row.get('hash')
+                    if h:
+                        self.db.delete_activity(h)
+                        deleted += 1
+            self.runs_count_label.text = f'{self.db.get_count()}'
+            # Clear selection and hide FAB
+            if hasattr(self, 'activities_table') and self.activities_table:
+                self.activities_table.selected.clear()
+                self.activities_table.update()
+            self.hide_floating_action_bar()
+            await self.refresh_data_view()
+            ui.notify(f"Deleted {deleted} activit{'ies' if deleted != 1 else 'y'}", type='positive', icon='delete')
     
     async def refresh_data_view(self):
         """
         Refresh data using DB-side sorting.
         """
-        # Convert boolean state to string for DB
+        # [Keep existing sorting logic...]
         sort_order = 'desc' if self.current_sort_desc else 'asc'
 
-        # 1. Fetch data sorted by DB
         self.activities_data = self.db.get_activities(
             self.current_timeframe, 
             self.current_session_id,
-            sort_by=self.current_sort_by,   # <--- Uses state
-            sort_order=sort_order           # <--- Uses state
+            sort_by=self.current_sort_by,
+            sort_order=sort_order
         )
         
-        # 2. Convert to DataFrame (No need to sort in Pandas anymore!)
         if self.activities_data:
             self.df = pd.DataFrame(self.activities_data)
-            # We still need date_obj for the charts
             self.df['date_obj'] = pd.to_datetime(self.df['date'])
-            # self.df = self.df.sort_values('date_obj') <-- DELETED (Redundant)
         else:
             self.df = None
         
-        # Update all tabs
+        # --- CRITICAL FIX: Update Filter Bar AFTER data load ---
         self.update_report_text() 
         self.update_activities_grid() 
+        self.update_filter_bar() # <--- ADD THIS LINE
         self.update_trends_chart() 
         
         # Toggle buttons
@@ -1931,6 +2131,23 @@ class GarminAnalyzerApp:
         
         Requirements: 11.1, 11.7
         """
+        # Guard: skip if we're programmatically setting focus mode value
+        if self._entering_focus_mode:
+            return
+        
+        # If we're in focus mode and user picks a DIFFERENT timeframe, exit focus mode
+        if self.focus_mode_active and not str(e.value).startswith('🎯'):
+            self.focus_mode_active = False
+            # Remove the Focus option from dropdown and restore styling
+            self._entering_focus_mode = True
+            new_options = [o for o in self.timeframe_select.options if not str(o).startswith('🎯')]
+            self.timeframe_select.options = new_options
+            self._entering_focus_mode = False
+            self.timeframe_select.style(remove='border: 1px solid #34d399; box-shadow: 0 0 12px rgba(16, 185, 129, 0.4); border-radius: 8px;')
+        elif self.focus_mode_active and str(e.value).startswith('🎯'):
+            # User re-selected the focus option itself, no-op
+            return
+        
         # Update current timeframe state from the dropdown value
         self.current_timeframe = e.value
         
@@ -2229,7 +2446,7 @@ root.destroy()
                     'transform transition-all duration-300 ease-out '
                     'shadow-lg rounded-xl ' 
                     'hover:border-zinc-500 hover:shadow-[0_7px_17px_rgba(0,0,0,0.9)] hover:-translate-y-1 hover:bg-zinc-800'
-                )
+                ).style('max-width: 720px; margin: 0 auto;')
                 
                 if activity_hash:
                     card.on('click', lambda h=activity_hash: self.open_activity_detail_modal(h, from_feed=True))
@@ -2248,13 +2465,18 @@ root.destroy()
                                         ui.icon('local_fire_department').classes('text-xs text-orange-400')
                                         ui.label(f"{d['calories']} cal")
                         
-                        # --- ROW 2: Context Tags (FIXED: Duplicates Removed) ---
+                        # --- ROW 2: Context Tags ---
                         with ui.row().classes('w-full items-center gap-2 mt-2'):
                             for tag in run_type_tag.split(' | '):
                                 ui.label(tag).classes('text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 tracking-wide')
                             
-                            if d.get('te_label'):
+                            # --- UPDATED CHECK ---
+                            # Check if the label exists AND is not the string "None"
+                            te_label = d.get('te_label')
+                            if te_label and str(te_label) != "None":
                                 te_color = d.get('te_label_color', 'text-zinc-400')
+                                
+                                # Determine styling based on color class
                                 if 'text-purple-400' in te_color: bg_color, border_color = 'bg-purple-500/10', 'border-purple-500/30'
                                 elif 'text-red-400' in te_color: bg_color, border_color = 'bg-red-500/10', 'border-red-500/30'
                                 elif 'text-orange-400' in te_color: bg_color, border_color = 'bg-orange-500/10', 'border-orange-500/30'
@@ -2263,12 +2485,17 @@ root.destroy()
                                 else: bg_color, border_color = 'bg-zinc-800', 'border-zinc-700'
                                 
                                 text_color = te_color.split()[0] if ' ' in te_color else te_color
-                                ui.label(d['te_label']).classes(f"text-[10px] font-bold px-2 py-0.5 rounded {bg_color} border {border_color} {text_color} tracking-wide")
+                                
+                                physio_tag = ui.label(te_label).classes(
+                                    f"text-[10px] font-bold px-2 py-0.5 rounded {bg_color} border {border_color} {text_color} "
+                                    "tracking-wide cursor-pointer hover:brightness-125 transition-all"
+                                )
+                                physio_tag.on('click.stop', lambda t=te_label: self.show_training_effect_info(t))
 
                         # --- ROW 3: Main Metrics Grid ---
                         with ui.row().classes('w-full gap-4 mb-1 items-center mt-3'):
                             with ui.column().classes('flex-1'):
-                                with ui.grid(columns=5).classes('w-full gap-3'):
+                                with ui.grid(columns=3).classes('w-full gap-3'):
                                     # Distance
                                     with ui.column().classes('gap-0').style('line-height: 1.1;'):
                                         with ui.row().classes('items-center gap-1'):
@@ -2289,21 +2516,6 @@ root.destroy()
                                             ui.icon('speed').classes('text-purple-400 text-xs')
                                             ui.label('PACE').classes('text-[10px] text-gray-500 font-bold tracking-wider')
                                         ui.label(d.get('pace', '--')).classes('text-lg font-bold').style('line-height: 1;')
-                                        
-                                    # Efficiency
-                                    with ui.column().classes('gap-0').style('line-height: 1.1;'):
-                                        with ui.row().classes('items-center gap-1'):
-                                            ui.label('EFFICIENCY').classes('text-[10px] text-gray-500 font-bold tracking-wider')
-                                            ui.icon('help_outline').classes('text-zinc-600 hover:text-white text-[10px] cursor-pointer').on('click.stop', lambda: self.show_ef_info())
-                                        ui.label(f"{d.get('efficiency_factor', 0):.2f}").classes('text-lg font-bold').style('color: #10B981; line-height: 1;')
-                                        
-                                    # Decoupling
-                                    with ui.column().classes('gap-0').style('line-height: 1.1;'):
-                                        with ui.row().classes('items-center gap-1'):
-                                            ui.label('DECOUPLING').classes('text-[10px] text-gray-500 font-bold tracking-wider')
-                                            ui.icon('help_outline').classes('text-zinc-600 hover:text-white text-[10px] cursor-pointer').on('click.stop', lambda: self.show_cost_info())
-                                        cost_color = '#10B981' if cost <= 5 else '#ff4d4d'
-                                        ui.label(f"{cost:.1f}%").classes(f'text-lg font-bold').style(f'color: {cost_color}; line-height: 1;')
                             
                             ui.element('div').classes('h-full').style('width: 1px; background-color: #27272a; margin: 0 8px;')
                             
@@ -2335,22 +2547,44 @@ root.destroy()
                                         ui.icon('directions_run').classes('text-blue-400 text-sm')
                                         ui.label(f"{d.get('avg_cadence', 0)}").classes('text-sm font-bold text-white')
                             
-                            # Right: Form Status Pill
-                            form = analyze_form(d.get('avg_cadence'), d.get('avg_stance_time'), d.get('avg_step_length'), d.get('avg_vertical_oscillation'))
-                            if form['verdict'] != 'ANALYZING':
-                                if form['verdict'] in ['ELITE FORM', 'GOOD FORM']:
-                                    pill_bg, pill_border, pill_text = 'bg-emerald-500/10', 'border-emerald-700/30', 'text-emerald-400'
-                                elif form['verdict'] in ['OVERSTRIDING', 'HEAVY FEET', 'INEFFICIENT']:
-                                    pill_bg, pill_border, pill_text = 'bg-amber-500/10', 'border-amber-700/30', 'text-amber-400'
-                                elif form['verdict'] in ['LOW CADENCE', 'PLODDING']:
-                                    pill_bg, pill_border, pill_text = 'bg-red-500/10', 'border-red-700/30', 'text-red-400'
-                                else:
-                                    pill_bg, pill_border, pill_text = 'bg-slate-500/10', 'border-slate-700/30', 'text-slate-400'
+                            # Right side: verdict pills
+                            with ui.row().classes('items-center gap-2 flex-wrap'):
+                                # Aerobic Efficiency Verdict Pill
+                                run_ef = d.get('efficiency_factor', 0)
+                                run_cost = d.get('decoupling', 0)
+                                ef_above_avg = run_ef >= avg_ef if avg_ef > 0 else False
+                                low_decouple = run_cost <= 5
                                 
-                                with ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {pill_bg} {pill_border}'):
-                                    ui.label('🦶').classes('text-sm')
-                                    ui.label('Form:').classes(f'text-xs font-bold {pill_text}')
-                                    ui.label(form['verdict'].title()).classes(f'text-xs font-bold {pill_text}')
+                                if ef_above_avg and low_decouple:
+                                    aero_verdict, aero_bg, aero_border, aero_text = 'Efficient', 'bg-emerald-500/10', 'border-emerald-700/30', 'text-emerald-400'
+                                elif ef_above_avg and not low_decouple:
+                                    aero_verdict, aero_bg, aero_border, aero_text = 'Pushing', 'bg-orange-500/10', 'border-orange-700/30', 'text-orange-400'
+                                elif not ef_above_avg and low_decouple:
+                                    aero_verdict, aero_bg, aero_border, aero_text = 'Easy', 'bg-blue-500/10', 'border-blue-700/30', 'text-blue-400'
+                                else:
+                                    aero_verdict, aero_bg, aero_border, aero_text = 'Drifting', 'bg-red-500/10', 'border-red-700/30', 'text-red-400'
+                                
+                                with ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {aero_bg} {aero_border}'):
+                                    ui.label('⚡').classes('text-sm')
+                                    ui.label('Aero:').classes(f'text-xs font-bold {aero_text}')
+                                    ui.label(aero_verdict).classes(f'text-xs font-bold {aero_text}')
+
+                                # Form Status Pill
+                                form = analyze_form(d.get('avg_cadence'), d.get('avg_stance_time'), d.get('avg_step_length'), d.get('avg_vertical_oscillation'))
+                                if form['verdict'] != 'ANALYZING':
+                                    if form['verdict'] in ['ELITE FORM', 'GOOD FORM']:
+                                        pill_bg, pill_border, pill_text = 'bg-emerald-500/10', 'border-emerald-700/30', 'text-emerald-400'
+                                    elif form['verdict'] in ['OVERSTRIDING', 'HEAVY FEET', 'INEFFICIENT']:
+                                        pill_bg, pill_border, pill_text = 'bg-amber-500/10', 'border-amber-700/30', 'text-amber-400'
+                                    elif form['verdict'] in ['LOW CADENCE', 'PLODDING']:
+                                        pill_bg, pill_border, pill_text = 'bg-red-500/10', 'border-red-700/30', 'text-red-400'
+                                    else:
+                                        pill_bg, pill_border, pill_text = 'bg-slate-500/10', 'border-slate-700/30', 'text-slate-400'
+                                    
+                                    with ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {pill_bg} {pill_border}'):
+                                        ui.label('🦶').classes('text-sm')
+                                        ui.label('Form:').classes(f'text-xs font-bold {pill_text}')
+                                        ui.label(form['verdict'].title()).classes(f'text-xs font-bold {pill_text}')
     
     def show_hrr_info(self):
         """
@@ -2400,46 +2634,196 @@ A sign your body is struggling to recover from recent hard training.
     
     def show_volume_info(self):
         """
-        Show informational modal about Volume Classification logic.
-        Explains the 'Ultra Trinity' (Terrain, HR, Mechanics).
+        Show informational modal about the current Volume lens.
+        Content adapts based on self.volume_lens.
         """
         with ui.dialog() as dialog, ui.card().classes('bg-zinc-900 text-white p-6 max-w-2xl border border-zinc-800'):
-            # Title (Clean, no X)
-            ui.label('Volume Quality Analysis').classes('text-xl font-bold text-white mb-2')
             
-            # The 3 Buckets Grid
-            with ui.column().classes('gap-6'):
-                
-                # 1. High Quality (Green)
-                with ui.row().classes('gap-4 items-start'):
-                    ui.icon('verified').classes('text-emerald-400 text-2xl mt-1')
-                    with ui.column().classes('gap-1'):
-                        ui.label('High Quality (The Engine)').classes('text-base font-bold text-emerald-400')
-                        ui.label('Running on flat/rolling terrain with good mechanics (Cadence > 160) and honest effort. These miles build fitness without breaking the chassis.').classes('text-sm text-zinc-300')
+            if self.volume_lens == 'quality':
+                # === QUALITY LENS ===
+                ui.label('Volume Quality Analysis').classes('text-xl font-bold text-white mb-2')
+                with ui.column().classes('gap-6'):
+                    with ui.row().classes('gap-4 items-start'):
+                        ui.icon('verified').classes('text-emerald-400 text-2xl mt-1')
+                        with ui.column().classes('gap-1'):
+                            ui.label('High Quality (The Engine)').classes('text-base font-bold text-emerald-400')
+                            ui.label('Running on flat/rolling terrain with good mechanics (Cadence > 160) and honest effort. These miles build fitness without breaking the chassis.').classes('text-sm text-zinc-300')
+                    with ui.row().classes('gap-4 items-start'):
+                        ui.icon('hiking').classes('text-blue-400 text-2xl mt-1')
+                        with ui.column().classes('gap-1'):
+                            ui.label('Structural (The Base)').classes('text-base font-bold text-blue-400')
+                            ui.label('Valid volume that includes Hiking (Steep Grade), Recovery Shuffles (Low HR), or Walking. These miles build durability and aerobic base without the mechanical stress of fast running.').classes('text-sm text-zinc-300')
+                    with ui.row().classes('gap-4 items-start'):
+                        ui.icon('warning').classes('text-red-400 text-2xl mt-1')
+                        with ui.column().classes('gap-1'):
+                            ui.label('Broken (The Junk)').classes('text-base font-bold text-red-400')
+                            ui.label('The "Danger Zone." You are working hard (High HR) but moving poorly (Low Cadence). This usually happens at the end of long runs when form falls apart. These miles cause injury.').classes('text-sm text-zinc-300')
+                ui.separator().classes('my-6 border-zinc-800')
+                with ui.column().classes('gap-2 mb-4'):
+                    ui.label('How we decide:').classes('text-xs font-bold text-zinc-500 uppercase tracking-wider')
+                    ui.label('We analyze every single mile split against Terrain, Metabolic Cost, and Mechanics.').classes('text-sm text-zinc-400')
 
-                # 2. Structural (Blue)
-                with ui.row().classes('gap-4 items-start'):
-                    ui.icon('hiking').classes('text-blue-400 text-2xl mt-1')
-                    with ui.column().classes('gap-1'):
-                        ui.label('Structural (The Base)').classes('text-base font-bold text-blue-400')
-                        ui.label('Valid volume that includes Hiking (Steep Grade), Recovery Shuffles (Low HR), or Walking. These miles build durability and aerobic base without the mechanical stress of fast running.').classes('text-sm text-zinc-300')
+            elif self.volume_lens == 'mix':
+                # === TRAINING MIX LENS (verdict-focused) ===
+                ui.label('Training Mix Analysis').classes('text-xl font-bold text-white mb-2')
+                ui.label('Shows how your weekly mileage breaks down by run type (Easy, Tempo, Hard). Your verdict reflects the balance:').classes('text-sm text-zinc-400 mb-4')
+                with ui.column().classes('gap-4'):
+                    # Verdict: POLARIZED (ideal)
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('check_circle').classes('text-emerald-400 text-lg')
+                            ui.label('POLARIZED').classes('text-sm font-bold text-emerald-400')
+                        ui.label('The gold standard — 80%+ easy miles with purposeful hard sessions. You\'re building a big aerobic engine while sharpening speed. Keep it up.').classes('text-sm text-zinc-300')
+                    # Verdict: BALANCED
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('balance').classes('text-blue-400 text-lg')
+                            ui.label('BALANCED').classes('text-sm font-bold text-blue-400')
+                        ui.label('A decent variety of run types. Not bad, but pushing more volume into easy runs would unlock better aerobic gains with less fatigue.').classes('text-sm text-zinc-300')
+                    # Verdict: TEMPO HEAVY (warning)
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('warning_amber').classes('text-amber-400 text-lg')
+                            ui.label('TEMPO HEAVY').classes('text-sm font-bold text-amber-400')
+                        ui.label('Too much time in the moderate zone without enough easy. This leads to chronic fatigue without the recovery to absorb it. Swap some tempo runs for true easy days.').classes('text-sm text-zinc-300')
+                    # Verdict: MONOTONE
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(249, 115, 22, 0.1); border: 1px solid rgba(249, 115, 22, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('repeat').classes('text-orange-400 text-lg')
+                            ui.label('MONOTONE').classes('text-sm font-bold text-orange-400')
+                        ui.label('Nearly all your miles are the same type. Add variety — even one tempo or interval session per week creates a stronger training stimulus.').classes('text-sm text-zinc-300')
 
-                # 3. Broken (Red)
-                with ui.row().classes('gap-4 items-start'):
-                    ui.icon('warning').classes('text-red-400 text-2xl mt-1')
-                    with ui.column().classes('gap-1'):
-                        ui.label('Broken (The Junk)').classes('text-base font-bold text-red-400')
-                        ui.label('The "Danger Zone." You are working hard (High HR) but moving poorly (Low Cadence). This usually happens at the end of long runs when form falls apart. These miles cause injury.').classes('text-sm text-zinc-300')
+            elif self.volume_lens == 'load':
+                # === LOAD LENS (matches chart legend: Recovery/Maintenance/Productive/Overreaching) ===
+                ui.label('Training Load Analysis').classes('text-xl font-bold text-white mb-2')
+                ui.label('Each bar shows your weekly mileage broken down by training stress. Strain is calculated from duration, intensity, and heart rate for each run:').classes('text-sm text-zinc-400 mb-4')
+                with ui.column().classes('gap-4'):
+                    # Legend/Verdict: MAINTAINING (healthy balance)
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('check_circle').classes('text-emerald-400 text-lg')
+                            ui.label('MAINTAINING').classes('text-sm font-bold text-emerald-400')
+                        ui.label('A healthy mix of easy and hard runs — your training load is sustainable and balanced. The sweet spot for steady progress without burnout.').classes('text-sm text-zinc-300')
+                    # Legend: Recovery
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(96, 165, 250, 0.1); border: 1px solid rgba(96, 165, 250, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('spa').classes('text-blue-400 text-lg')
+                            ui.label('UNDERTRAINED').classes('text-sm font-bold text-blue-400')
+                        ui.label('Nearly all recovery-level runs with no real stimulus. Great after a race, but sustained easy-only training won\'t build fitness. Add one harder session per week.').classes('text-sm text-zinc-300')
+                    # Legend: Productive
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(249, 115, 22, 0.1); border: 1px solid rgba(249, 115, 22, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('trending_up').classes('text-orange-400 text-lg')
+                            ui.label('PRODUCTIVE').classes('text-sm font-bold text-orange-400')
+                        ui.label('Heavy productive volume — you\'re pushing hard. This builds fitness fast but can\'t be sustained indefinitely. Plan a step-back week every 3-4 weeks.').classes('text-sm text-zinc-300')
+                    # Legend: Overreaching
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('warning').classes('text-red-400 text-lg')
+                            ui.label('OVERREACHING').classes('text-sm font-bold text-red-400')
+                        ui.label('Too many high-stress sessions. An occasional spike is fine, but repeated overreaching leads to injury and staleness. Follow with an easy week.').classes('text-sm text-zinc-300')
 
-            # The "Why" Footer
-            ui.separator().classes('my-6 border-zinc-800')
-            with ui.column().classes('gap-2 mb-4'):
-                ui.label('How we decide:').classes('text-xs font-bold text-zinc-500 uppercase tracking-wider')
-                ui.label('We analyze every single mile split against Terrain, Metabolic Cost, and Mechanics.').classes('text-sm text-zinc-400')
+            elif self.volume_lens == 'zones':
+                # === HR ZONES LENS (5 zone-anchored verdicts) ===
+                ui.label('Heart Rate Zones Analysis').classes('text-xl font-bold text-white mb-2')
+                ui.label('Shows weekly time distribution across heart rate zones. The 80/20 rule says ~80% of training should be easy (Zone 1-2) and ~20% hard (Zone 4-5):').classes('text-sm text-zinc-400 mb-4')
+                with ui.column().classes('gap-4'):
+                    # Verdict: 80/20 BALANCED (ideal)
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('check_circle').classes('text-emerald-400 text-lg')
+                            ui.label('80/20 BALANCED').classes('text-sm font-bold text-emerald-400')
+                        ui.label('The gold standard — ~80% easy, ~20% hard. You\'re building a massive aerobic engine while sharpening speed with controlled intensity. This is how elites train.').classes('text-sm text-zinc-300')
+                    # Verdict: ZONE 2 BASE
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('favorite').classes('text-blue-400 text-lg')
+                            ui.label('ZONE 2 BASE').classes('text-sm font-bold text-blue-400')
+                        ui.label('Nearly all Zone 1-2. This is where mitochondrial magic happens — fat oxidation, capillary density, cardiac efficiency. Great for base building, but one hard session per week rounds it out.').classes('text-sm text-zinc-300')
+                    # Verdict: ZONE 3 JUNK (cautionary)
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('pause_circle').classes('text-amber-400 text-lg')
+                            ui.label('ZONE 3 JUNK').classes('text-sm font-bold text-amber-400')
+                        ui.label('Too much time in the grey zone — not easy enough to recover, not hard enough to force adaptation. This is wasted effort. Slow your easy runs and make hard days truly hard.').classes('text-sm text-zinc-300')
+                    # Verdict: ZONE 4 THRESHOLD ADDICT
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(249, 115, 22, 0.1); border: 1px solid rgba(249, 115, 22, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('fitness_center').classes('text-orange-400 text-lg')
+                            ui.label('ZONE 4 THRESHOLD ADDICT').classes('text-sm font-bold text-orange-400')
+                        ui.label('Excessive threshold grinding. Zone 4 builds lactate clearance, but more than ~2 sessions/week accumulates fatigue without enough recovery. Add more easy volume between hard days.').classes('text-sm text-zinc-300')
+                    # Verdict: ZONE 5 REDLINING
+                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.25);'):
+                        with ui.row().classes('items-center gap-2 mb-1'):
+                            ui.icon('local_fire_department').classes('text-red-400 text-lg')
+                            ui.label('ZONE 5 REDLINING').classes('text-sm font-bold text-red-400')
+                        ui.label('Too much VO2max-level effort. Zone 5 is powerful but demands ~48h recovery between sessions. Back off and rebuild your aerobic base — the speed will come back faster.').classes('text-sm text-zinc-300')
 
-            # "Got it!" Button
+
+            # "Got it!" Button (all lenses)
             ui.button('Got it!', on_click=dialog.close).classes('w-full bg-green-600 hover:bg-green-500 text-white font-bold')
 
+        dialog.open()
+
+    def show_training_effect_info(self, label):
+        """Explains the physiological takeaway of the Garmin Label."""
+        # Normalize labels for dictionary lookup
+        lookup = label.upper().strip()
+        
+        info = {
+            'VO2 MAX': {
+                'title': '🚀 VO2 MAX (Aerobic Capacity)',
+                'takeaway': 'You pushed your aerobic ceiling. This run improved your body\'s ability to oxygenate muscles during high-sustained efforts.',
+                'tip': 'Expect higher cardiac strain. This builds "race pace" durability.'
+            },
+            'MAX POWER': {
+                'title': '⚡ MAX POWER (Anaerobic)',
+                'takeaway': 'Short, explosive bursts. You worked the anaerobic system to improve raw speed and sprinting torque.',
+                'tip': 'Metabolically expensive. Prioritize sleep tonight.'
+            },
+            'THRESHOLD': {
+                'title': '🔥 THRESHOLD',
+                'takeaway': 'Working at the edge of lactate clearance. This improves how long you can hold a fast pace before "burning out."',
+                'tip': 'Crucial for half-marathon and marathon performance.'
+            },
+            'MAINTAINING': {
+                'title': '🔷 MAINTAINING',
+                'takeaway': 'The sweet spot for aerobic health. You hit the right volume to hold your fitness without overtaxing the system.',
+                'tip': 'The backbone of a successful training block.'
+            },
+            'RECOVERY': {
+                'title': '🧘 RECOVERY',
+                'takeaway': 'Easy effort to promote blood flow. This facilitates repair without adding new structural damage.',
+                'tip': 'If your heart rate felt high during this "Recovery" run, you might be over-fatigued.'
+            },
+            'BASE': {
+                'title': '🟡 BASE',
+                'takeaway': 'Low-intensity endurance work. This builds mitochondrial density and teaches your body to burn fat efficiently.',
+                'tip': 'Stay slow to grow. Don\'t rush these runs.'
+            }
+        }
+        
+        # Fallback if the label isn't in our dictionary
+        data = info.get(lookup, {
+            'title': label, 
+            'takeaway': 'This represents your primary physiological adaptation for this session.', 
+            'tip': 'Consistency is the key to long-term gains.'
+        })
+        
+        with ui.dialog() as dialog, ui.card().classes('p-6 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl'):
+            with ui.column().classes('gap-2'):
+                ui.label(data['title']).classes('text-xl font-bold text-white')
+                ui.separator().classes('bg-zinc-700')
+                ui.label('TRAINING FOCUS:').classes('text-[10px] font-bold text-zinc-500 tracking-widest mt-2')
+                ui.label(data['takeaway']).classes('text-zinc-300 leading-relaxed')
+                
+                if data['tip']:
+                    with ui.row().classes('items-start gap-2 mt-4 p-3 bg-blue-500/10 rounded-lg border border-blue-500/20'):
+                        ui.icon('lightbulb').classes('text-blue-400 text-sm mt-0.5')
+                        ui.label(data['tip']).classes('text-sm italic text-blue-200 flex-1')
+                
+                ui.button('GOT IT', on_click=dialog.close).classes('mt-6 w-full bg-zinc-800 hover:bg-zinc-700 text-white font-bold')
+        
         dialog.open()
 
     def show_ef_info(self):
@@ -2718,176 +3102,358 @@ Max Speed:   {max_speed_mph:.1f} mph
 Activity Breakdown: {activity_breakdown}
 """
     
+    def _get_unique_tags_from_current_data(self):
+        """
+        Scans all currently loaded activities to find which tags actually exist.
+        Returns two sets: context_tags (Tempo, etc.) and physio_tags (VO2, etc.)
+        """
+        context_tags = set()
+        physio_tags = set()
+        
+        # Threshold for 'Long Run' calculation
+        if self.df is not None and len(self.df) >= 5:
+            lrt = self.df['distance_mi'].quantile(0.8)
+        else:
+            lrt = 10.0
+
+        for act in self.activities_data:
+            # 1. Get Context Tags (Tempo, Long Run, Hills, etc.)
+            # We use the EXACT same function the Feed Cards use
+            c_tags = self.classify_run_type(act, lrt) 
+            if c_tags:
+                # classify_run_type returns a string like "Long Run | Hills", split it
+                for t in c_tags.split(' | '):
+                    # Strip existing emojis so we get just "Hills" or "Tempo"
+                    clean_t = t.replace('⛰️', '').replace('🔥', '').replace('🦅', '').replace('⚡', '').replace('🏃', '').replace('🧘', '').replace('🔷', '').strip()
+                    if clean_t: context_tags.add(clean_t)
+            
+            # 2. Get Physio Tags (VO2 Max, Threshold, etc.)
+            p_tag = act.get('te_label')
+            if p_tag and str(p_tag) != "None":
+                physio_tags.add(p_tag)
+                
+        return sorted(list(context_tags)), sorted(list(physio_tags))
+
+    def update_filter_bar(self):
+        """
+        Renders the 'Apple Native' Filter Bar.
+        Layout: STACKED
+        Row 1: Distance (Scope)
+        Row 2: Tags (Context & Characteristics)
+        """
+        self.filter_container.clear()
+        
+        # 1. Get available tags
+        avail_context, avail_physio = self._get_unique_tags_from_current_data()
+        
+        # 2. Distance Definitions
+        dist_filters = [
+            {'id': 'all', 'label': 'All'},
+            {'id': 'short', 'label': 'Short'},
+            {'id': 'med', 'label': 'Medium'},
+            {'id': 'long_dist', 'label': 'Long'},
+        ]
+
+        with self.filter_container:
+            # CHANGE: Main container is now a COLUMN (Vertical Stack)
+            # gap-3 gives nice breathing room between the Distance row and Tags row
+            with ui.column().classes('w-full gap-3 mb-2'):
+                
+                # --- ROW 1: DISTANCE (The Scope) ---
+                with ui.row().classes('w-full items-center'):
+                    with ui.row().classes('bg-zinc-200/80 p-1 rounded-lg gap-0 shadow-[inset_0_1px_2px_rgba(0,0,0,0.06)] border border-zinc-200/50'):
+                        for f in dist_filters:
+                            if f['id'] == 'all':
+                                is_active = not any(k in self.active_filters for k in ['short', 'med', 'long_dist'])
+                            else:
+                                is_active = f['id'] in self.active_filters
+                            
+                            if is_active:
+                                classes = "bg-white text-black shadow-sm font-bold ring-1 ring-black/5"
+                            else:
+                                classes = "bg-transparent text-zinc-500 hover:text-zinc-800 font-medium"
+                            
+                            ui.button(f['label'], on_click=lambda id=f['id']: self.toggle_filter(id), color=None).props('flat dense no-caps ripple=False').classes(
+                                f"rounded-md px-4 py-1 text-xs transition-all duration-200 no-ripple {classes}"
+                            )
+
+                # --- ROW 2: TAGS (The Details) ---
+                # Full width container, tags wrap naturally
+                with ui.row().classes('w-full gap-2 wrap items-center'):
+                    
+                    # GROUP: CONTEXT TAGS
+                    for tag_name in avail_context:
+                        config = self.TAG_CONFIG.get(tag_name, {'icon': '🏷️', 'color': 'zinc'})
+                        color = config['color']
+                        label = tag_name if any(c in tag_name for c in ['🏃','🔥','⚡','⛰️','🧘','🔷']) else f"{config['icon']} {tag_name}"
+                        is_active = tag_name in self.active_filters
+                        
+                        if is_active:
+                            classes = f"filter-active bg-{color}-500 text-white shadow-md border border-{color}-600/20 transform scale-105"
+                        else:
+                            classes = "bg-white text-zinc-500 border border-zinc-300/80 hover:border-zinc-400 hover:text-zinc-700 hover:shadow-sm shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
+
+                        ui.button(label, on_click=lambda t=tag_name: self.toggle_filter(t), color=None).props('flat dense no-caps ripple=False').classes(
+                            f"rounded-full px-4 py-1 text-xs font-bold transition-all duration-200 no-ripple {classes}"
+                        )
+
+                    # GROUP: PHYSIO TAGS
+                    for tag_name in avail_physio:
+                        color = 'emerald'
+                        if 'MAX' in tag_name or 'VO2' in tag_name: color = 'fuchsia'
+                        elif 'ANAEROBIC' in tag_name: color = 'orange'
+                        elif 'THRESHOLD' in tag_name: color = 'amber'
+                        
+                        is_active = tag_name in self.active_filters
+
+                        if is_active:
+                            classes = f"filter-active bg-{color}-500 text-white shadow-md border border-{color}-600/20"
+                        else:
+                            classes = "bg-white text-zinc-400 border border-zinc-200 hover:border-zinc-300 hover:text-zinc-600"
+
+                        ui.button(tag_name, on_click=lambda t=tag_name: self.toggle_filter(t), color=None).props('flat dense no-caps ripple=False').classes(
+                            f"rounded-md px-3 py-1 text-[10px] font-bold tracking-wider uppercase transition-all duration-200 no-ripple {classes}"
+                        )
+
+    def toggle_filter(self, filter_id):
+        """Toggles a filter on/off with STRICT logic."""
+        
+        dist_keys = {'short', 'med', 'long_dist'}
+        
+        # 1. Handle Distance Mutex
+        if filter_id == 'all':
+            # CLEAR all distance filters
+            self.active_filters -= dist_keys
+            
+        elif filter_id in dist_keys:
+            # If clicking the ACTIVE distance filter -> Do nothing (enforce one selection)
+            # OR allow toggling off to go back to "All"
+            if filter_id in self.active_filters:
+                self.active_filters.remove(filter_id) # Clicking active -> goes to 'All'
+            else:
+                self.active_filters -= dist_keys # Clear others
+                self.active_filters.add(filter_id) # Set new
+        
+        # 2. Handle Tags (Standard Toggle) - No changes here
+        else:
+            if filter_id in self.active_filters:
+                self.active_filters.remove(filter_id)
+            else:
+                self.active_filters.add(filter_id)
+        
+        self.update_filter_bar() 
+        self.update_activities_grid()
+    
     def update_activities_grid(self):
         """
-        Update activities table with native NiceGUI table component.
+        Update activities table.
+        FIXED:
+        1. IDs are now DETERMINISTIC (Fixes Ghost Selection/FAB issues).
+        2. Preserves 'virtual-scroll' and Dark UI.
+        3. Uses standard $emit for buttons.
         """
-        # Clear grid container
         self.grid_container.clear()
         
-        # Check if activities_data is empty
+        # --- 1. FILTER LOGIC ---
+        filtered_data = []
+        if self.df is not None and len(self.df) >= 5:
+            lrt = self.df['distance_mi'].quantile(0.8)
+        else:
+            lrt = 10.0
+
         if not self.activities_data:
+            filtered_data = []
+        else:
+            for act in self.activities_data:
+                dist = act.get('distance_mi', 0)
+                
+                # Tags
+                run_tags_set = set()
+                c_tags_str = self.classify_run_type(act, lrt)
+                if c_tags_str:
+                    for t in c_tags_str.split(' | '):
+                        run_tags_set.add(t.replace('⛰️', '').replace('🔥', '').replace('🦅', '').replace('⚡', '').replace('🏃', '').replace('🧘', '').replace('🔷', '').strip())
+                
+                p_tag = act.get('te_label')
+                if p_tag and str(p_tag) != "None": run_tags_set.add(str(p_tag).strip())
+                
+                # Filter Check
+                include = True
+                if self.active_filters:
+                    dist_keys = {'short', 'med', 'long_dist', 'all'}
+                    active_tag_filters = {f for f in self.active_filters if f not in dist_keys}
+                    
+                    if 'short' in self.active_filters and not (dist < 5): include = False
+                    if 'med' in self.active_filters and not (5 <= dist <= 10): include = False
+                    if 'long_dist' in self.active_filters and not (dist > 10): include = False
+                    
+                    if active_tag_filters and not active_tag_filters.issubset(run_tags_set): 
+                        include = False
+                
+                if include: 
+                    filtered_data.append(act)
+
+        # --- EMPTY STATE ---
+        if not filtered_data:
             with self.grid_container:
-                ui.label('No activities found. Import activities to view data.').classes(
-                    'text-center text-gray-400 mt-20'
-                )
+                 with ui.card().classes('w-full bg-zinc-900/80 p-0 border border-zinc-800 shadow-2xl overflow-hidden').style('border-radius: 12px; min-height: 200px;'):
+                     ui.label('No runs match these filters.').classes('w-full text-center text-zinc-500 mt-20 font-mono')
             return
 
-        # --- 1. PREPARE COLUMNS ---
-        columns = [
-            {'name': 'date', 'label': 'Date', 'field': 'date_sort', 'align': 'left', 'sortable': True},
-            {'name': 'filename', 'label': 'Filename', 'field': 'filename', 'align': 'left', 'sortable': True},
-            {'name': 'distance', 'label': 'Dist', 'field': 'distance', 'align': 'left', 'sortable': True},
-            {'name': 'elevation', 'label': 'Elev', 'field': 'elevation', 'align': 'left', 'sortable': True},
-            {'name': 'ef', 'label': 'Efficiency', 'field': 'ef', 'align': 'left', 'sortable': True},
-            {'name': 'cost', 'label': 'Decoupling', 'field': 'cost', 'align': 'left', 'sortable': True},
-            {'name': 'cadence', 'label': 'Cadence', 'field': 'cadence', 'align': 'left', 'sortable': True},
-            {'name': 'actions', 'label': '', 'field': 'actions', 'align': 'center'},
-        ]
-        
-        # --- 2. HELPER: SYSTEM TIMEZONE ---
-        import time
-        # Get local timezone abbreviation (e.g., EST, PDT)
-        system_tz = time.tzname[time.daylight]
-
-        # --- 3. TRANSFORM DATA ---
+        # --- 2. PREPARE ROWS (With STABLE IDs) ---
         rows = []
-        for act in self.activities_data:
-            cost = act.get('decoupling', 0)
+        for i, act in enumerate(filtered_data):
+            db_hash = act.get('db_hash')
+            if db_hash:
+                row_id = db_hash
+            else:
+                # [CRITICAL FIX] STABLE ID GENERATION - Use filename + date if hash missing
+                # Ensure no Python objects (like lists) are in the ID to prevent serialization issues
+                safe_filename = act.get('filename', 'unk').replace('.fit', '')
+                row_id = f"temp_{safe_filename}"
             
-            # --- DATE FORMATTING LOGIC ---
-            raw_date = act.get('date', '') # e.g. "2026-02-22 17:06"
+            # Format Data
+            raw_date = act.get('date', '') 
             try:
                 dt = datetime.strptime(raw_date, '%Y-%m-%d %H:%M')
-                
-                # Manual formatting for cross-platform consistency
-                hour = dt.strftime('%I').lstrip('0')
-                minute = dt.strftime('%M')
-                am_pm = dt.strftime('%p')
-                month = dt.strftime('%m').lstrip('0')
-                day = dt.strftime('%d').lstrip('0')
-                year = dt.strftime('%Y')
-                weekday = dt.strftime('%a')
-                
-                # FIXED: Added space before {system_tz}
-                # Result: "Thu, 4/25/2026 5:06PM EDT"
-                nice_date = f"{weekday}, {month}/{day}/{year} {hour}:{minute}{am_pm} {system_tz}"
-            except:
-                nice_date = raw_date
+                n_date, n_time = dt.strftime('%a, %m/%d'), dt.strftime('%I:%M%p').lstrip('0')
+            except: n_date, n_time = raw_date, ""
 
+            ts = self.classify_run_type(act, lrt)
+            te = act.get('te_label')
+            tags_str = f"{ts} | {te}" if te and str(te) != "None" else ts
+            
+            p_raw = act.get('pace', 0)
+            def fmt_pace(v):
+                try: return v if ':' in str(v) else f"{int(float(v))}:{int((float(v)%1)*60):02d}"
+                except: return "--:--"
+            
             rows.append({
-                'date_sort': raw_date,      # ISO format for sorting
-                'date_display': nice_date,  # Human format for display
-                'filename': act.get('filename', '')[:30],
-                'distance': f"{act.get('distance_mi', 0):.1f} mi",
-                'elevation': f"{act.get('elevation_ft', 0)} ft",
-                'ef': f"{act.get('efficiency_factor', 0):.2f}",
-                'cost': f"{cost:.1f}%",
-                'cost_value': cost,
-                'cadence': f"{act.get('avg_cadence', 0)} spm",
-                'hash': act.get('db_hash', ''),
+                'id': row_id,             # The Quasar Row Key
+                'hash': db_hash,          # The Real Data Key
+                'filename': act.get('filename', 'Unknown'),
+                'date_d': n_date, 
+                'date_t': n_time,
+                'date_sort': raw_date,
+                'distance': f"{act.get('distance_mi', 0):.1f}",
+                'dist_sort': act.get('distance_mi', 0),
+                'pace': fmt_pace(p_raw),
+                'pace_sort': float(p_raw) if isinstance(p_raw, (int, float)) else 0,
+                'elev_d': f"{int(act.get('elevation_ft', 0)):,}",
+                'elev_sort': act.get('elevation_ft', 0),
+                'type_display': tags_str, # Keep as STRING to prevent NiceGUI intervention
+
                 'full_filename': act.get('filename', ''),
+                'file_path': act.get('file_path', '')
             })
-        
+
+        # --- 3. COLUMNS ---
+        columns = [
+            {'name': 'date', 'label': 'Date', 'field': 'date_sort', 'align': 'center', 'sortable': True, 'style': 'width: 100px'},
+            {'name': 'distance', 'label': 'Dist', 'field': 'dist_sort', 'align': 'left', 'sortable': True, 'style': 'width: 70px'},
+            {'name': 'pace', 'label': 'Pace', 'field': 'pace_sort', 'align': 'left', 'sortable': True, 'style': 'width: 80px'},
+            {'name': 'elevation', 'label': 'Elev', 'field': 'elev_sort', 'align': 'left', 'sortable': True, 'style': 'width: 85px'},
+            {'name': 'type', 'label': 'Run Context', 'field': 'type_sort', 'align': 'left', 'sortable': True}, 
+            {'name': 'actions', 'label': '', 'field': 'actions', 'align': 'right', 'style': 'width: 130px'},
+        ]
+
         # --- 4. RENDER TABLE ---
         with self.grid_container:
-            with ui.card().classes('w-full bg-zinc-900 p-4 border-0').style('border-radius: 8px; overflow: hidden; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
-                # Configure initial pagination state to match app state
-                initial_pagination = {
-                    'rowsPerPage': 0, # 0 = All rows (we handle filtering via DB)
-                    'sortBy': self.current_sort_by,
-                    'descending': self.current_sort_desc
-                }
+            with ui.card().classes('w-full bg-zinc-900/80 p-0 border border-zinc-800 shadow-2xl overflow-hidden').style('border-radius: 12px;'):
                 
                 table = ui.table(
-                    columns=columns,
-                    rows=rows,
-                    row_key='hash',
-                    pagination=initial_pagination 
-                ).classes('w-full h-full')
+                    columns=columns, 
+                    rows=rows, 
+                    row_key='id',       # Matches our STABLE ID
+                    selection='multiple',
+                    pagination={'rowsPerPage': 0, 'sortBy': self.current_sort_by, 'descending': self.current_sort_desc},
+                ).classes('w-full h-full text-sm sticky-header-table')
+                self.activities_table = table  # Store ref for selection clearing
+
+                # Preserved Dark Mode - REMOVED virtual-scroll to fix event trapping
+                table.props('flat bordered dense dark')
+
+                # --- EVENT HANDLERS ---
                 
-                # --- WIRE UP THE EVENT ---
-                # This tells NiceGUI: "When user clicks a header, don't sort locally. Call this function."
-                table.on('request', self.handle_table_request)
+                def on_selection(e):
+                    # Use table.selected (NiceGUI's binding) - NOT e.args (raw Quasar event)
+                    # table.selected always reflects the current cumulative selection state.
+                    self.show_floating_action_bar(table.selected)
+
+                # Button Handlers - receive full row object via $parent.$emit
+                async def handle_analyze(e):
+                    row = e.args
+                    activity_hash = row.get('hash') if isinstance(row, dict) else None
+                    print(f"DEBUG: Analyze clicked, hash={activity_hash}")
+                    if activity_hash:
+                        await self.open_activity_detail_modal(activity_hash, from_feed=True)
+
+                async def handle_download(e):
+                    row = e.args
+                    print(f"DEBUG: Download clicked")
+                    if isinstance(row, dict):
+                        await self.download_fit_file(row)
+
+                async def handle_delete(e):
+                    row = e.args
+                    if isinstance(row, dict):
+                        activity_hash = row.get('hash')
+                        filename = row.get('full_filename')
+                        print(f"DEBUG: Delete clicked, hash={activity_hash}")
+                        await self.delete_activity_inline(activity_hash, filename)
+
+                # Bind Events
+                table.on('selection', on_selection)
+                table.on('click-analyze', handle_analyze)
+                table.on('click-download', handle_download)
+                table.on('click-delete', handle_delete)
+
+                # --- SLOTS ---
                 
-                # --- SLOT: DATE (Two-line stack) ---
-                table.add_slot('body-cell-date', '''
+                table.add_slot('body-cell-date', '<q-td :props="props"><div class="flex flex-col items-center justify-center py-1 leading-tight"><span class="font-bold text-gray-200 text-[13px]">{{ props.row.date_d }}</span><span class="text-[11px] text-zinc-500 font-mono mt-0.5">{{ props.row.date_t }}</span></div></q-td>')
+                table.add_slot('body-cell-distance', '<q-td :props="props"><div class="flex items-baseline gap-0.5"><span class="font-bold text-white text-[13px]">{{ props.row.distance }}</span><span class="text-xs text-zinc-500">mi</span></div></q-td>')
+                table.add_slot('body-cell-pace', '<q-td :props="props"><div class="flex items-baseline gap-0.5"><span class="font-mono text-zinc-300 text-[12px]">{{ props.row.pace }}</span><span class="text-[10px] text-zinc-600">/mi</span></div></q-td>')
+                table.add_slot('body-cell-elevation', '<q-td :props="props"><div class="flex items-baseline gap-1"><span class="text-[10px] brightness-125">⛰️</span><span class="font-bold text-zinc-300 text-[12px]">{{ props.row.elev_d }}</span><span class="text-[10px] text-zinc-500">ft</span></div></q-td>')
+                
+                table.add_slot('body-cell-type', '''
                     <q-td :props="props">
-                        <div class="flex flex-col">
-                            <span class="font-bold text-gray-200" style="font-size: 0.9rem;">
-                                {{ props.row.date_display.split(', ')[0] }}, {{ props.row.date_display.split(', ')[1].split(' ')[0] }}
-                            </span>
-                            <span class="text-xs text-zinc-500 font-mono">
-                                {{ props.row.date_display.split(' ')[2] }} {{ props.row.date_display.split(' ')[3] }}
+                        <div class="flex flex-wrap gap-2 items-center py-1">
+                            <span v-for="tag in props.row.type_display.split(' | ')" :key="tag"  
+                                  class="px-2 py-1 rounded-md text-[11px] font-bold tracking-wide border whitespace-nowrap bg-zinc-800 text-zinc-400 border-zinc-700">
+                                {{ tag }}
                             </span>
                         </div>
                     </q-td>
                 ''')
 
-                # --- SLOT: ACTIONS (With RESTORED CSS classes) ---
+                # ACTIONS SLOT
+                # CRITICAL: Must use $parent.$emit (not $emit) to reach NiceGUI's event listener.
+                # $emit in a Quasar slot emits on the slot's own context (goes nowhere).
+                # $parent.$emit emits on the parent QTable component (which NiceGUI listens to).
                 table.add_slot('body-cell-actions', '''
                     <q-td :props="props">
-                        <q-btn flat dense round icon="visibility" size="sm" class="view-btn" @click="$parent.$emit('view-row', props.row)"/>
-                        <q-btn flat dense round icon="delete" size="sm" class="delete-btn" @click="$parent.$emit('delete-row', props.row)"/>
+                        <div class="flex flex-nowrap items-center justify-end gap-1 relative z-10">
+                            <q-btn flat dense round icon="visibility" size="sm" 
+                                class="action-btn no-ripple text-zinc-400 hover:text-white" :ripple="false"
+                                @click.stop="$parent.$emit('click-analyze', props.row)">
+                                <q-tooltip>Analyze</q-tooltip>
+                            </q-btn>
+                            <q-btn flat dense round icon="download" size="sm" 
+                                class="action-btn no-ripple text-zinc-400 hover:text-white" :ripple="false"
+                                @click.stop="$parent.$emit('click-download', props.row)">
+                                <q-tooltip>Save .FIT</q-tooltip>
+                            </q-btn>
+                            <q-btn flat dense round icon="delete" size="sm" 
+                                class="action-btn no-ripple text-zinc-400 hover:text-white" :ripple="false"
+                                @click.stop="$parent.$emit('click-delete', props.row)">
+                                <q-tooltip>Delete</q-tooltip>
+                            </q-btn>
+                        </div>
                     </q-td>
                 ''')
-                
-                # --- SLOT: COST (Conditional Coloring) ---
-                table.add_slot('body-cell-cost', '''
-                    <q-td :props="props">
-                        <span :style="props.row.cost_value > 5 ? 'color: #ff4d4d; font-weight: 600;' : 'color: #10B981; font-weight: 600;'">
-                            {{ props.value }}
-                        </span>
-                    </q-td>
-                ''')
-                
-                table.on('view-row', lambda e: self.open_activity_detail_modal(e.args['hash'], from_feed=True))
-                table.on('delete-row', lambda e: self.delete_activity_inline(e.args['hash'], e.args['full_filename']))
                 
                 table.props('flat bordered dense dark')
                 table.classes('bg-zinc-900 text-gray-200')
-
-            # --- RESTORED CSS FOR HOVER EFFECTS ---
-            ui.add_head_html('''
-            <style>
-            .q-table thead tr, .q-table tbody td {
-                height: 48px;
-            }
-            .q-table th {
-                background-color: #2a2a2a !important;
-                color: #aaa !important;
-                font-weight: 600 !important;
-                border-bottom: 2px solid #444 !important;
-            }
-            .q-table td {
-                color: #ddd !important;
-                border-bottom: 1px solid #333 !important;
-            }
-            .q-table tbody tr:hover {
-                background-color: #252525 !important;
-            }
-            /* RESTORED: Ghost button styling */
-            .delete-btn.q-btn, .view-btn.q-btn {
-                opacity: 0.3 !important;
-                transition: all 0.2s ease !important;
-            }
-            .delete-btn.q-btn .q-icon, .view-btn.q-btn .q-icon {
-                color: #9ca3af !important;
-            }
-            .delete-btn.q-btn:hover, .view-btn.q-btn:hover {
-                opacity: 1 !important;
-                background-color: rgba(255, 255, 255, 0.1) !important;
-                transform: scale(1.1);
-            }
-            .delete-btn.q-btn:hover .q-icon, .view-btn.q-btn:hover .q-icon {
-                color: #ffffff !important;
-            }
-            /* Disable Quasar's default hover overlay */
-            .delete-btn.q-btn:before, .view-btn.q-btn:before {
-                display: none !important;
-            }
-            </style>
-            ''')
     
     async def handle_table_request(self, e):
         """
@@ -2910,6 +3476,37 @@ Activity Breakdown: {activity_breakdown}
             direction = "↓" if new_descending else "↑"
             ui.notify(f"Sorted by {new_sort_by} {direction}", type='info', timeout=1000)
 
+    async def download_fit_file(self, row_data):
+        """
+        Copy the FIT file to the user's Downloads folder.
+        """
+        try:
+            # 1. Get Source Path from the row data
+            source_path = row_data.get('file_path')
+            
+            # Validation
+            if not source_path:
+                ui.notify("File path missing in database.", type='negative')
+                return
+            
+            if not os.path.exists(source_path):
+                ui.notify(f"File not found on disk: {os.path.basename(source_path)}", type='negative')
+                return
+
+            # 2. Determine Destination
+            filename = os.path.basename(source_path)
+            downloads_path = os.path.expanduser("~/Downloads")
+            dest_path = os.path.join(downloads_path, filename)
+            
+            # 3. Copy File (shutil.copy2 preserves metadata)
+            import shutil
+            shutil.copy2(source_path, dest_path)
+            
+            ui.notify(f"Saved to Downloads: {filename}", type='positive', icon='download')
+            
+        except Exception as e:
+            ui.notify(f"Download failed: {e}", type='negative')
+    
     async def delete_activity_inline(self, activity_hash, filename):
         """
         Delete activity from inline button click.
@@ -3126,7 +3723,7 @@ Activity Breakdown: {activity_breakdown}
         # 2. AGGREGATE FOR CHART
         grouped = df_splits.groupby(['week_start', 'category'])
         weeks = sorted(df_splits['week_start'].unique())
-        categories = ['STRUCTURAL', 'HIGH QUALITY', 'BROKEN']
+        categories = ['HIGH QUALITY', 'STRUCTURAL', 'BROKEN']
         
         chart_data = {cat: {'y': [], 'customdata': []} for cat in categories}
         week_labels = []
@@ -3168,8 +3765,9 @@ Activity Breakdown: {activity_breakdown}
                 customdata=chart_data[cat]['customdata'],
                 hovertemplate=(
                     '<b>%{y:.1f} mi</b><br>'
-                    '<span style="color: #cbd5e1; font-size: 12px;">' + desc + '</span><br>'
-                    '<span style="color: rgba(255,255,255,0.8); font-size: 11px;">Runs: %{customdata[0]}</span>'
+                    '<span style="font-size: 12px; font-weight: 600;">' + name + '</span><br>'
+                    '<span style="color: #e2e8f0; font-size: 12px;">' + desc + '</span><br>'
+                    '<span style="color: rgba(255,255,255,0.9); font-size: 11px;">Runs: %{customdata[0]}</span>'
                     '<extra></extra>'
                 ),
                 
@@ -3178,8 +3776,8 @@ Activity Breakdown: {activity_breakdown}
                 **bar_style
             ))
 
-        add_trace('STRUCTURAL', 'Structural', '#3b82f6', 'Valid Base/Hills', 1)
-        add_trace('HIGH QUALITY', 'High Quality', '#10b981', 'Dialed Mechanics', 2)
+        add_trace('HIGH QUALITY', 'High Quality', '#10b981', 'Dialed Mechanics', 1)
+        add_trace('STRUCTURAL', 'Structural', '#3b82f6', 'Valid Base/Hills', 2)
         add_trace('BROKEN', 'Broken', '#f43f5e', 'Mechanical Failure', 3)
         
         fig.update_layout(
@@ -3195,14 +3793,582 @@ Activity Breakdown: {activity_breakdown}
         
         return fig
     
+    def generate_training_mix_chart(self):
+        """Generate weekly volume chart grouped by RUN TYPE (Training Mix lens).
+        Uses purple/pink/indigo palette to visually distinguish from Quality lens."""
+        if self.df is None or self.df.empty or not self.activities_data:
+            return None
+        
+        # Calculate long run threshold
+        distances = [a.get('distance_mi', 0) for a in self.activities_data if a.get('distance_mi', 0) > 0]
+        long_run_threshold = max(10, sorted(distances)[int(len(distances) * 0.8)] if len(distances) >= 5 else 10)
+        
+        # Build per-activity data with primary run type only
+        mix_data = []
+        for activity in self.activities_data:
+            date_obj = pd.to_datetime(activity.get('date'))
+            week_start = date_obj.to_period('W-MON').start_time
+            dist = activity.get('distance_mi', 0)
+            if dist < 0.1:
+                continue
+            
+            act_hash = activity.get('db_hash')
+            act_date_str = date_obj.strftime('%-m/%-d')
+
+            # Get primary tag only (first tag before any ' | ')
+            full_tag = self.classify_run_type(activity, long_run_threshold)
+            primary = full_tag.split(' | ')[0] if full_tag else '🟡 Base'
+            # Strip emoji prefix for clean category name
+            clean_primary = primary.split(' ', 1)[-1] if ' ' in primary else primary
+            
+            mix_data.append({
+                'week_start': week_start, 'distance': dist, 'category': clean_primary,
+                'hash': act_hash, 'date_str': act_date_str
+            })
+        
+        if not mix_data:
+            return None
+        
+        df_mix = pd.DataFrame(mix_data)
+        
+        # Define categories and colors (purple/pink/indigo palette — distinct from Quality)
+        categories = ['Recovery', 'Base', 'Steady', 'Long Run', 'Tempo']
+        colors = {
+            'Recovery': '#60a5fa',    # Blue-400 (easy)
+            'Base':     '#a78bfa',    # Violet-400 (easy)
+            'Steady':   '#f59e0b',    # Amber-500 (moderate)
+            'Long Run': '#34d399',    # Emerald-400 (trails/endurance)
+            'Tempo':    '#f43f5e',    # Rose-500 (hard)
+        }
+        descriptions = {
+            'Recovery': 'Easy effort, promotes adaptation',
+            'Base':     'Aerobic foundation miles',
+            'Steady':   'Moderate effort, gray zone',
+            'Long Run': 'Duration-focused endurance',
+            'Tempo':    'High intensity speed work',
+        }
+        
+        # Group and build chart data
+        grouped = df_mix.groupby(['week_start', 'category'])
+        weeks = sorted(df_mix['week_start'].unique())
+        
+        chart_data = {cat: {'y': [], 'customdata': []} for cat in categories}
+        week_labels = []
+        
+        for week in weeks:
+            sunday = week - pd.Timedelta(days=1)
+            saturday = week + pd.Timedelta(days=5)
+            week_labels.append(f"{sunday.strftime('%b %-d')} - {saturday.strftime('%-d')}")
+            
+            for cat in categories:
+                try:
+                    cell = grouped.get_group((week, cat))
+                    total_dist = cell['distance'].sum()
+                    unique_acts = cell[['hash', 'date_str']].drop_duplicates()
+                    dates_list = unique_acts['date_str'].tolist()
+                    date_display = ", ".join(dates_list[:3]) + (f" (+{len(dates_list)-3})" if len(dates_list) > 3 else "")
+                    hash_list = unique_acts['hash'].tolist()
+                    chart_data[cat]['y'].append(total_dist)
+                    chart_data[cat]['customdata'].append([date_display, json.dumps(hash_list), cat])
+                except KeyError:
+                    chart_data[cat]['y'].append(0)
+                    chart_data[cat]['customdata'].append(["", "[]", cat])
+        
+        # Build figure
+        fig = go.Figure()
+        bar_style = dict(opacity=0.85, marker_line=dict(width=1, color='rgba(255,255,255,0.1)'))
+        
+        for cat in categories:
+            if sum(chart_data[cat]['y']) > 0:  # Only add trace if there's data
+                fig.add_trace(go.Bar(
+                    x=week_labels, y=chart_data[cat]['y'], name=cat,
+                    marker_color=colors.get(cat, '#888'),
+                    customdata=chart_data[cat]['customdata'],
+                    hovertemplate=(
+                        '<b>%{y:.1f} mi</b><br>'
+                        f'<span style="color: {colors.get(cat, "#888")}; font-size: 12px; font-weight: 600;">{cat}</span><br>'
+                        f'<span style="color: #e2e8f0; font-size: 12px;">{descriptions.get(cat, "")}</span><br>'
+                        '<span style="color: rgba(255,255,255,0.9); font-size: 11px;">Runs: %{customdata[0]}</span>'
+                        '<extra></extra>'
+                    ),
+                    hoverlabel=dict(font=dict(color='white'), bordercolor='white'),
+                    **bar_style
+                ))
+        
+        fig.update_layout(
+            barmode='stack', template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            height=300, margin=dict(l=40, r=20, t=20, b=80),
+            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal"),
+            bargap=0.35, xaxis=dict(tickangle=0, showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
+            yaxis=dict(title='Miles', showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
+            clickmode='event'
+        )
+        fig.update_layout(modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']})
+        
+        return fig
+
+    def _calculate_strain(self, activity):
+        """Calculate strain score for an activity (shared logic)."""
+        moving_time_min = activity.get('moving_time_min', 0)
+        avg_hr = activity.get('avg_hr', 0)
+        max_hr = activity.get('max_hr', 185)
+        intensity = avg_hr / max_hr if max_hr > 0 else 0
+        
+        if intensity < 0.65: factor = 1.0
+        elif intensity < 0.75: factor = 1.5
+        elif intensity < 0.85: factor = 3.0
+        elif intensity < 0.92: factor = 6.0
+        else: factor = 10.0
+        
+        return int(moving_time_min * factor)
+
+    def generate_load_chart(self):
+        """Generate weekly volume chart grouped by LOAD CATEGORY (Load lens).
+        Uses teal/cyan palette to visually distinguish from Quality and Mix lenses."""
+        if self.df is None or self.df.empty or not self.activities_data:
+            return None
+        
+        load_data = []
+        for activity in self.activities_data:
+            date_obj = pd.to_datetime(activity.get('date'))
+            week_start = date_obj.to_period('W-MON').start_time
+            dist = activity.get('distance_mi', 0)
+            if dist < 0.1:
+                continue
+            
+            act_hash = activity.get('db_hash')
+            act_date_str = date_obj.strftime('%-m/%-d')
+            
+            strain = self._calculate_strain(activity)
+            if strain < 75: load_cat = 'Recovery'
+            elif strain < 150: load_cat = 'Maintenance'
+            elif strain < 300: load_cat = 'Productive'
+            else: load_cat = 'Overreaching'
+            
+            load_data.append({
+                'week_start': week_start, 'distance': dist, 'category': load_cat,
+                'hash': act_hash, 'date_str': act_date_str, 'strain': strain
+            })
+        
+        if not load_data:
+            return None
+        
+        df_load = pd.DataFrame(load_data)
+        
+        # Colors match feed card Load colors for consistency
+        categories = ['Recovery', 'Maintenance', 'Productive', 'Overreaching']
+        colors = {
+            'Recovery':     '#60a5fa',  # Blue — matches feed card
+            'Maintenance':  '#10B981',  # Green — matches feed card
+            'Productive':   '#f97316',  # Orange — matches feed card
+            'Overreaching': '#ef4444',  # Red — matches feed card
+        }
+        descriptions = {
+            'Recovery':     'Low stress, promotes adaptation',
+            'Maintenance':  'Steady load, maintains fitness',
+            'Productive':   'Hard effort, builds fitness',
+            'Overreaching': 'Very high stress, needs recovery',
+        }
+        
+        grouped = df_load.groupby(['week_start', 'category'])
+        weeks = sorted(df_load['week_start'].unique())
+        
+        chart_data = {cat: {'y': [], 'customdata': []} for cat in categories}
+        week_labels = []
+        
+        for week in weeks:
+            sunday = week - pd.Timedelta(days=1)
+            saturday = week + pd.Timedelta(days=5)
+            week_labels.append(f"{sunday.strftime('%b %-d')} - {saturday.strftime('%-d')}")
+            
+            for cat in categories:
+                try:
+                    cell = grouped.get_group((week, cat))
+                    total_dist = cell['distance'].sum()
+                    unique_acts = cell[['hash', 'date_str']].drop_duplicates()
+                    dates_list = unique_acts['date_str'].tolist()
+                    date_display = ", ".join(dates_list[:3]) + (f" (+{len(dates_list)-3})" if len(dates_list) > 3 else "")
+                    hash_list = unique_acts['hash'].tolist()
+                    chart_data[cat]['y'].append(total_dist)
+                    chart_data[cat]['customdata'].append([date_display, json.dumps(hash_list), cat])
+                except KeyError:
+                    chart_data[cat]['y'].append(0)
+                    chart_data[cat]['customdata'].append(["", "[]", cat])
+        
+        fig = go.Figure()
+        bar_style = dict(opacity=0.85, marker_line=dict(width=1, color='rgba(255,255,255,0.1)'))
+        
+        for cat in categories:
+            if sum(chart_data[cat]['y']) > 0:
+                fig.add_trace(go.Bar(
+                    x=week_labels, y=chart_data[cat]['y'], name=cat,
+                    marker_color=colors.get(cat, '#888'),
+                    customdata=chart_data[cat]['customdata'],
+                    hovertemplate=(
+                        '<b>%{y:.1f} mi</b><br>'
+                        f'<span style="color: {colors.get(cat, "#888")}; font-size: 12px; font-weight: 600;">{cat}</span><br>'
+                        f'<span style="color: #e2e8f0; font-size: 12px;">{descriptions.get(cat, "")}</span><br>'
+                        '<span style="color: rgba(255,255,255,0.9); font-size: 11px;">Runs: %{customdata[0]}</span>'
+                        '<extra></extra>'
+                    ),
+                    hoverlabel=dict(font=dict(color='white'), bordercolor='white'),
+                    **bar_style
+                ))
+        
+        fig.update_layout(
+            barmode='stack', template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            height=300, margin=dict(l=40, r=20, t=20, b=80),
+            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal"),
+            bargap=0.35, xaxis=dict(tickangle=0, showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
+            yaxis=dict(title='Miles', showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
+            clickmode='event'
+        )
+        fig.update_layout(modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']})
+        
+        return fig
+
+    def calculate_mix_verdict(self, df):
+        """Calculate verdict for Training Mix lens — checks 80/20 distribution."""
+        if df is None or df.empty or not self.activities_data:
+            return 'N/A', '#71717a', 'bg-zinc-700'
+        
+        try:
+            distances = [a.get('distance_mi', 0) for a in self.activities_data if a.get('distance_mi', 0) > 0]
+            long_run_threshold = max(10, sorted(distances)[int(len(distances) * 0.8)] if len(distances) >= 5 else 10)
+            
+            total_miles = 0
+            easy_miles = 0   # Recovery + Base
+            hard_miles = 0   # Tempo + Intervals
+            steady_miles = 0
+            long_miles = 0
+            
+            for activity in self.activities_data:
+                dist = activity.get('distance_mi', 0)
+                if dist < 0.1:
+                    continue
+                total_miles += dist
+                
+                full_tag = self.classify_run_type(activity, long_run_threshold)
+                primary = full_tag.split(' | ')[0] if full_tag else '🟡 Base'
+                clean_primary = primary.split(' ', 1)[-1] if ' ' in primary else primary
+                
+                if clean_primary in ('Recovery', 'Base'):
+                    easy_miles += dist
+                elif clean_primary == 'Tempo':
+                    hard_miles += dist
+                elif clean_primary == 'Steady':
+                    steady_miles += dist
+                elif clean_primary == 'Long Run':
+                    long_miles += dist
+            
+            if total_miles < 1:
+                return 'N/A', '#71717a', 'bg-zinc-700'
+            
+            easy_pct = (easy_miles / total_miles) * 100
+            hard_pct = (hard_miles / total_miles) * 100
+            tempo_threshold_pct = ((hard_miles + steady_miles) / total_miles) * 100
+            
+            # Tempo Heavy: >40% combined Tempo+Steady without enough easy
+            if tempo_threshold_pct > 40 and easy_pct < 50:
+                return 'TEMPO HEAVY', '#ef4444', 'bg-red-500/20'
+            
+            # Polarized: >=60% easy + some hard work (great for ultra runners)
+            if easy_pct >= 60 and hard_miles > 0:
+                return 'POLARIZED', '#10b981', 'bg-emerald-500/20'
+            
+            # Monotone: almost all one type
+            if easy_pct > 85:
+                return 'MONOTONE', '#f97316', 'bg-orange-500/20'
+            
+            # Default: balanced
+            return 'BALANCED', '#3b82f6', 'bg-blue-500/20'
+            
+        except:
+            return 'N/A', '#71717a', 'bg-zinc-700'
+
+    def calculate_load_verdict(self, df):
+        """Calculate verdict for Load lens — checks stress distribution."""
+        if df is None or df.empty or not self.activities_data:
+            return 'N/A', '#71717a', 'bg-zinc-700'
+        
+        try:
+            total_runs = 0
+            recovery_runs = 0
+            maintenance_runs = 0
+            productive_runs = 0
+            overreaching_runs = 0
+            
+            for activity in self.activities_data:
+                dist = activity.get('distance_mi', 0)
+                if dist < 0.1:
+                    continue
+                total_runs += 1
+                strain = self._calculate_strain(activity)
+                
+                if strain < 75: recovery_runs += 1
+                elif strain < 150: maintenance_runs += 1
+                elif strain < 300: productive_runs += 1
+                else: overreaching_runs += 1
+            
+            if total_runs < 2:
+                return 'N/A', '#71717a', 'bg-zinc-700'
+            
+            overreach_pct = (overreaching_runs / total_runs) * 100
+            productive_pct = (productive_runs / total_runs) * 100
+            easy_pct = ((recovery_runs + maintenance_runs) / total_runs) * 100
+            
+            # Overreaching: too much overreaching
+            if overreach_pct > 25:
+                return 'OVERREACHING', '#ef4444', 'bg-red-500/20'
+            
+            # Productive: heavy productive volume
+            if productive_pct > 40:
+                return 'PRODUCTIVE', '#f97316', 'bg-orange-500/20'
+            
+            # Undertrained: all easy, no stimulus
+            if easy_pct > 90 and productive_runs == 0:
+                return 'UNDERTRAINED', '#3b82f6', 'bg-blue-500/20'
+            
+            # Maintaining: healthy balance
+            return 'MAINTAINING', '#10b981', 'bg-emerald-500/20'
+            
+        except:
+            return 'N/A', '#71717a', 'bg-zinc-700'
+
+    def generate_hr_zones_chart(self):
+        """Generate weekly volume chart grouped by HEART RATE ZONE (HR Zones lens).
+        Y-axis = minutes. Each activity assigned to dominant zone via avg_hr/max_hr ratio."""
+        if self.df is None or self.df.empty or not self.activities_data:
+            return None
+        
+        zone_data = []
+        for activity in self.activities_data:
+            date_obj = pd.to_datetime(activity.get('date'))
+            week_start = date_obj.to_period('W-MON').start_time
+            moving_time = activity.get('moving_time_min', 0)
+            if moving_time < 1:
+                continue
+            
+            avg_hr = activity.get('avg_hr', 0)
+            max_hr = activity.get('max_hr', 185)
+            if not avg_hr or not max_hr or max_hr == 0:
+                continue
+            
+            act_hash = activity.get('db_hash')
+            act_date_str = date_obj.strftime('%-m/%-d')
+            
+            # Classify into HR zone based on avg_hr / max_hr ratio
+            ratio = avg_hr / max_hr
+            if ratio < 0.60:
+                zone = 'Zone 1'
+            elif ratio < 0.70:
+                zone = 'Zone 2'
+            elif ratio < 0.80:
+                zone = 'Zone 3'
+            elif ratio < 0.90:
+                zone = 'Zone 4'
+            else:
+                zone = 'Zone 5'
+            
+            zone_data.append({
+                'week_start': week_start, 'minutes': moving_time, 'zone': zone,
+                'hash': act_hash, 'date_str': act_date_str
+            })
+        
+        if not zone_data:
+            return None
+        
+        df_zones = pd.DataFrame(zone_data)
+        
+        # Unified HR zone color palette (consistent across modal + trends)
+        categories = ['Zone 1', 'Zone 2', 'Zone 3', 'Zone 4', 'Zone 5']
+        colors = {
+            'Zone 1': '#60a5fa',  # Blue — easy/warmup
+            'Zone 2': '#34d399',  # Emerald — aerobic base
+            'Zone 3': '#fbbf24',  # Amber — threshold/gray zone ⚠️
+            'Zone 4': '#f97316',  # Orange — hard
+            'Zone 5': '#ef4444',  # Red — max effort
+        }
+        descriptions = {
+            'Zone 1': 'Easy (<60% max HR)',
+            'Zone 2': 'Aerobic (60-70% max HR)',
+            'Zone 3': 'Threshold (70-80% max HR)',
+            'Zone 4': 'Hard (80-90% max HR)',
+            'Zone 5': 'Max effort (>90% max HR)',
+        }
+        
+        grouped = df_zones.groupby(['week_start', 'zone'])
+        weeks = sorted(df_zones['week_start'].unique())
+        
+        chart_data = {cat: {'y': [], 'customdata': []} for cat in categories}
+        week_labels = []
+        
+        for week in weeks:
+            sunday = week - pd.Timedelta(days=1)
+            saturday = week + pd.Timedelta(days=5)
+            week_labels.append(f"{sunday.strftime('%b %-d')} - {saturday.strftime('%-d')}")
+            
+            for cat in categories:
+                try:
+                    cell = grouped.get_group((week, cat))
+                    total_mins = cell['minutes'].sum()
+                    unique_acts = cell[['hash', 'date_str']].drop_duplicates()
+                    dates_list = unique_acts['date_str'].tolist()
+                    date_display = ", ".join(dates_list[:3]) + (f" (+{len(dates_list)-3})" if len(dates_list) > 3 else "")
+                    hash_list = unique_acts['hash'].tolist()
+                    chart_data[cat]['y'].append(total_mins)
+                    chart_data[cat]['customdata'].append([date_display, json.dumps(hash_list), cat])
+                except KeyError:
+                    chart_data[cat]['y'].append(0)
+                    chart_data[cat]['customdata'].append(["", "[]", cat])
+        
+        fig = go.Figure()
+        bar_style = dict(opacity=0.85, marker_line=dict(width=1, color='rgba(255,255,255,0.1)'))
+        
+        for cat in categories:
+            if sum(chart_data[cat]['y']) > 0:
+                fig.add_trace(go.Bar(
+                    x=week_labels, y=chart_data[cat]['y'], name=cat,
+                    marker_color=colors.get(cat, '#888'),
+                    customdata=chart_data[cat]['customdata'],
+                    hovertemplate=(
+                        '<b>%{y:.0f} min</b><br>'
+                        f'<span style="color: {colors.get(cat, "#888")}; font-size: 12px; font-weight: 600;">{cat}</span><br>'
+                        f'<span style="color: #e2e8f0; font-size: 12px;">{descriptions.get(cat, "")}</span><br>'
+                        '<span style="color: rgba(255,255,255,0.9); font-size: 11px;">Runs: %{customdata[0]}</span>'
+                        '<extra></extra>'
+                    ),
+                    hoverlabel=dict(font=dict(color='white'), bordercolor='white'),
+                    **bar_style
+                ))
+        
+        fig.update_layout(
+            barmode='stack', template='plotly_dark',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            height=300, margin=dict(l=40, r=20, t=20, b=80),
+            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal"),
+            bargap=0.35, xaxis=dict(tickangle=0, showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
+            yaxis=dict(title='Minutes', showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
+            clickmode='event'
+        )
+        fig.update_layout(modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']})
+        
+        return fig
+
+    def calculate_hr_zones_verdict(self, df):
+        """Calculate verdict for HR Zones lens — checks zone distribution."""
+        if df is None or df.empty or not self.activities_data:
+            return 'N/A', '#71717a', 'bg-zinc-700'
+        
+        try:
+            z1_time = 0
+            z2_time = 0
+            z3_time = 0
+            z4_time = 0
+            z5_time = 0
+            total_time = 0
+            
+            for activity in self.activities_data:
+                moving_time = activity.get('moving_time_min', 0)
+                avg_hr = activity.get('avg_hr', 0)
+                max_hr = activity.get('max_hr', 185)
+                if not avg_hr or not max_hr or max_hr == 0 or moving_time < 1:
+                    continue
+                
+                total_time += moving_time
+                ratio = avg_hr / max_hr
+                if ratio < 0.60:
+                    z1_time += moving_time
+                elif ratio < 0.70:
+                    z2_time += moving_time
+                elif ratio < 0.80:
+                    z3_time += moving_time
+                elif ratio < 0.90:
+                    z4_time += moving_time
+                else:
+                    z5_time += moving_time
+            
+            if total_time < 1:
+                return 'N/A', '#71717a', 'bg-zinc-700'
+            
+            easy_pct = ((z1_time + z2_time) / total_time) * 100
+            z3_pct = (z3_time / total_time) * 100
+            z4_pct = (z4_time / total_time) * 100
+            z5_pct = (z5_time / total_time) * 100
+            
+            # Zone 5 Redlining: >15% in Zone 5 (truly maximal effort)
+            if z5_pct > 15:
+                return 'ZONE 5 REDLINING', '#ef4444', 'bg-red-500/20'
+            
+            # Zone 4 Threshold Addict: >25% in Zone 4
+            if z4_pct > 25:
+                return 'ZONE 4 THRESHOLD ADDICT', '#f97316', 'bg-orange-500/20'
+            
+            # Zone 3 Junk: >30% in the gray zone
+            if z3_pct > 30:
+                return 'ZONE 3 JUNK', '#fbbf24', 'bg-amber-500/20'
+            
+            # Zone 2 Base: >=85% in Z1+Z2 with very little intensity
+            if easy_pct >= 85:
+                return 'ZONE 2 BASE', '#3b82f6', 'bg-blue-500/20'
+            
+            # 80/20 Balanced: healthy distribution
+            return '80/20 BALANCED', '#10b981', 'bg-emerald-500/20'
+            
+        except:
+            return 'N/A', '#71717a', 'bg-zinc-700'
+
+    def refresh_volume_card(self):
+        """Surgically refresh only the volume card content based on current lens."""
+        if self.volume_card_container is None:
+            return
+        
+        self.volume_card_container.clear()
+        with self.volume_card_container:
+            # Generate chart based on current lens
+            if self.volume_lens == 'mix':
+                fig = self.generate_training_mix_chart()
+                verdict, v_color, v_bg = self.calculate_mix_verdict(self.df)
+                subtitle = 'Weekly distribution by run type'
+            elif self.volume_lens == 'load':
+                fig = self.generate_load_chart()
+                verdict, v_color, v_bg = self.calculate_load_verdict(self.df)
+                subtitle = 'Weekly distribution by training stress'
+            elif self.volume_lens == 'zones':
+                fig = self.generate_hr_zones_chart()
+                verdict, v_color, v_bg = self.calculate_hr_zones_verdict(self.df)
+                subtitle = 'Weekly time in each heart rate zone'
+            else:
+                fig = self.generate_weekly_volume_chart()
+                verdict, v_color, v_bg = self.calculate_volume_verdict(self.df)
+                subtitle = 'Breakdown in quality of miles (click any section to inspect runs)'
+            
+            # Update verdict badge
+            if hasattr(self, 'volume_verdict_label'):
+                self.volume_verdict_label.text = f'{verdict}'
+                self.volume_verdict_label.style(replace=f'color: {v_color};')
+            
+            # Update subtitle
+            if hasattr(self, 'volume_subtitle_label'):
+                self.volume_subtitle_label.text = subtitle
+            
+            # Render chart
+            if fig:
+                self.volume_chart = ui.plotly(fig).classes('w-full').style('cursor: pointer')
+                self.volume_chart.on('plotly_relayout', self.handle_volume_zoom)
+                self.volume_chart.on('plotly_click', self.handle_bar_click)
+            else:
+                ui.label('No data available for this view').classes('text-zinc-500 text-center py-8')
+    
     def generate_efficiency_decoupling_chart(self):
-        """Generate Running Efficiency vs. Aerobic Decoupling chart."""
+        """Generate Running Efficiency vs. Aerobic Decoupling chart with QUADRANT LOGIC."""
         if self.df is None or self.df.empty:
             return None
         
-        # Calculate trend
+        # --- 1. Calculate Trends ---
         try:
-            # SAFETY CHECK: Only calculate regression if we have 2+ points
             if len(self.df) >= 2:
                 from scipy.stats import linregress
                 x_nums = (self.df['date_obj'] - self.df['date_obj'].min()).dt.total_seconds()
@@ -3210,82 +4376,96 @@ Activity Breakdown: {activity_breakdown}
                 slope, intercept, r_value, p_value, std_err = linregress(x_nums, y_ef)
                 trend_msg, trend_color = self.calculate_trend_stats(self.df)
             else:
-                # Fallback for single run
-                slope = 0
-                intercept = 0
-                trend_msg = "Trend: Insufficient Data"
-                trend_color = "#888888"
+                slope, intercept = 0, 0
+                trend_msg, trend_color = "Trend: Insufficient Data", "#888888"
         except:
-            slope = 0
-            intercept = 0
-            trend_msg = "Insufficient data"
-            trend_color = "#888888"
+            slope, intercept = 0, 0
+            trend_msg, trend_color = "Insufficient data", "#888888"
         
-        # Create figure with secondary y-axis
+        # --- 2. Create Figure ---
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         
-        # Separate positive and negative decoupling
+        # --- 3. Decoupling Background Areas ---
         pos_d = self.df['decoupling'].copy()
         pos_d[pos_d < 0] = 0
         neg_d = self.df['decoupling'].copy()
         neg_d[neg_d > 0] = 0
         
-        # Add decoupling filled areas
-        fig.add_trace(
-            go.Scatter(
-                x=self.df['date_obj'], y=neg_d, name="Stable Zone",
-                fill='tozeroy', mode='lines', line=dict(width=0),
-                fillcolor='rgba(0, 128, 128, 0.2)', hoverinfo='skip', showlegend=False
-            ), secondary_y=True
-        )
+        # Teal zone (stable/negative decoupling)
+        fig.add_trace(go.Scatter(
+            x=self.df['date_obj'], y=neg_d, hoverinfo='skip', showlegend=False,
+            fill='tozeroy', mode='lines', line=dict(width=0),
+            fillcolor='rgba(0, 128, 128, 0.15)'
+        ), secondary_y=True)
         
-        fig.add_trace(
-            go.Scatter(
-                x=self.df['date_obj'], y=pos_d, name="Cost Zone",
-                fill='tozeroy', mode='lines',
-                line=dict(color='rgba(255, 77, 77, 0.5)', width=1),
-                fillcolor='rgba(255, 77, 77, 0.1)', hoverinfo='skip', showlegend=False
-            ), secondary_y=True
-        )
+        # Red zone (positive decoupling = cardiac drift)
+        fig.add_trace(go.Scatter(
+            x=self.df['date_obj'], y=pos_d, hoverinfo='skip', showlegend=False,
+            fill='tozeroy', mode='lines',
+            line=dict(color='rgba(255, 77, 77, 0.3)', width=1),
+            fillcolor='rgba(255, 77, 77, 0.08)'
+        ), secondary_y=True)
         
-        # Add EF line
-        fig.add_trace(
-            go.Scatter(
-                x=self.df['date_obj'], y=self.df['efficiency_factor'],
-                name="EF Trend", mode='lines',
-                line=dict(color='rgba(150, 150, 150, 0.3)', width=2, shape='spline'),
-                hoverinfo='skip', showlegend=False
-            ), secondary_y=False
-        )
+        # --- 4. EF Trend Line (subtle connector) ---
+        fig.add_trace(go.Scatter(
+            x=self.df['date_obj'], y=self.df['efficiency_factor'],
+            name="EF Line", mode='lines', hoverinfo='skip', showlegend=False,
+            line=dict(color='rgba(150, 150, 150, 0.25)', width=2, shape='spline')
+        ), secondary_y=False)
         
-        # Add trend line
+        # --- 5. QUADRANT LOGIC (Colored Dots) ---
+        # Threshold: user's mean EF splits "fast" vs "slow", 5% decoupling splits "stable" vs "drifting"
+        mean_ef = self.df['efficiency_factor'].mean()
+        decouple_threshold = 5.0
+        
+        groups = {
+            'Peak':     self.df[(self.df['efficiency_factor'] >= mean_ef) & (self.df['decoupling'] <= decouple_threshold)],
+            'Base':     self.df[(self.df['efficiency_factor'] < mean_ef) & (self.df['decoupling'] <= decouple_threshold)],
+            'Costly':   self.df[(self.df['efficiency_factor'] >= mean_ef) & (self.df['decoupling'] > decouple_threshold)],
+            'Struggle': self.df[(self.df['efficiency_factor'] < mean_ef) & (self.df['decoupling'] > decouple_threshold)],
+        }
+        
+        configs = {
+            'Peak':     {'color': '#10B981', 'label': 'Peak Run',       'symbol': 'circle',       'desc': 'Fast & Stable'},
+            'Base':     {'color': '#eab308', 'label': 'Base Run',       'symbol': 'circle',       'desc': 'Slow & Stable'},
+            'Costly':   {'color': '#f97316', 'label': 'Expensive Run',  'symbol': 'triangle-up',  'desc': 'Fast but Drift'},
+            'Struggle': {'color': '#ef4444', 'label': 'Struggle Run',   'symbol': 'x',            'desc': 'Slow & Drift'},
+        }
+        
+        for key, group in groups.items():
+            if not group.empty:
+                cfg = configs[key]
+                fig.add_trace(go.Scatter(
+                    x=group['date_obj'], y=group['efficiency_factor'],
+                    mode='markers', name=cfg['desc'],
+                    marker=dict(
+                        size=9, color=cfg['color'], symbol=cfg['symbol'],
+                        line=dict(width=1, color='white')
+                    ),
+                    hovertemplate=(
+                        f"<b>{cfg['label']}</b><br>"
+                        f"<i style='color:#aaa'>{cfg['desc']}</i><br>"
+                        "EF: %{y:.2f}<br>"
+                        "Decoupling: %{customdata:.1f}%"
+                        "<extra></extra>"
+                    ),
+                    customdata=group['decoupling']
+                ), secondary_y=False)
+        
+        # --- 6. Trend Dashed Line ---
         if slope != 0:
             x_min = self.df['date_obj'].min().to_pydatetime()
             x_max = self.df['date_obj'].max().to_pydatetime()
             x_nums_for_line = [0, (self.df['date_obj'].max() - self.df['date_obj'].min()).total_seconds()]
             y_trend_line = [intercept + slope * x for x in x_nums_for_line]
             
-            fig.add_trace(
-                go.Scatter(
-                    x=[x_min, x_max], y=y_trend_line, name="Fitness Trend",
-                    mode='lines', line=dict(color=trend_color, width=2, dash='dash'),
-                    opacity=0.6, hoverinfo='skip', showlegend=False
-                ), secondary_y=False
-            )
+            fig.add_trace(go.Scatter(
+                x=[x_min, x_max], y=y_trend_line, name="Fitness Trend",
+                mode='lines', line=dict(color=trend_color, width=2, dash='dash'),
+                opacity=0.6, hoverinfo='skip', showlegend=False
+            ), secondary_y=False)
         
-        # Add performance markers (simplified - just the data points)
-        fig.add_trace(
-            go.Scatter(
-                x=self.df['date_obj'],
-                y=self.df['efficiency_factor'],
-                mode='markers',
-                marker=dict(size=8, color='#10B981', line=dict(width=1, color='white')),
-                name='Runs',
-                hovertemplate='EF: %{y:.2f}<extra></extra>'
-            ), secondary_y=False
-        )
-        
-        # Update layout
+        # --- 7. Layout ---
         fig.update_layout(
             template='plotly_dark',
             paper_bgcolor='rgba(0,0,0,0)',
@@ -3298,27 +4478,15 @@ Activity Breakdown: {activity_breakdown}
         )
         
         fig.update_yaxes(
-            title_text="Running Efficiency",
-            color="#10B981",
-            secondary_y=False,
-            showgrid=True,
-            gridcolor='rgba(255, 255, 255, 0.1)'
+            title_text="Running Efficiency", color="#10B981",
+            secondary_y=False, showgrid=True, gridcolor='rgba(255, 255, 255, 0.05)'
         )
-        
         fig.update_yaxes(
-            title_text="Decoupling (%)",
-            color="#ff4d4d",
-            secondary_y=True,
-            range=[-5, max(20, self.df['decoupling'].max()+2)],
+            title_text="Decoupling (%)", color="#ff4d4d",
+            secondary_y=True, range=[-5, max(20, self.df['decoupling'].max() + 2)],
             showgrid=False
         )
-        
-        fig.update_xaxes(
-            showgrid=True,
-            gridcolor='rgba(255, 255, 255, 0.1)'
-        )
-        
-        # Hide modebar
+        fig.update_xaxes(showgrid=True, gridcolor='rgba(255, 255, 255, 0.05)')
         fig.update_layout(
             modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']}
         )
@@ -3942,10 +5110,9 @@ Activity Breakdown: {activity_breakdown}
     
     def calculate_efficiency_verdict(self, df):
         """
-        Calculate verdict for Efficiency chart using hierarchical logic.
-        FIXED: Returns 'N/A' if fewer than 2 runs (prevents SmallSampleWarning).
+        Calculate verdict for Efficiency chart using nuanced logic.
+        Understands that rising EF with moderate drift = progressive overload, not garbage.
         """
-        # SAFETY CHECK: Need at least 2 runs to calculate a slope
         if df is None or df.empty or len(df) < 2:
             return 'N/A', '#71717a', 'bg-zinc-700'
         
@@ -3953,26 +5120,36 @@ Activity Breakdown: {activity_breakdown}
             from scipy.stats import linregress
             x_nums = (df['date_obj'] - df['date_obj'].min()).dt.total_seconds()
             
-            # Calculate Decoupling slope
+            # Calculate slopes
             y_dec = df['decoupling']
             slope_dec, _, _, _, _ = linregress(x_nums, y_dec)
             slope_dec_per_week = slope_dec * 604800
             
-            # Calculate EF slope
             y_ef = df['efficiency_factor']
             slope_ef, _, _, _, _ = linregress(x_nums, y_ef)
             slope_ef_per_week = (slope_ef * 604800) * 100
             
-            # Rule #1: Safety First - Check Decoupling
-            if slope_dec_per_week > 0.2:
-                return 'GARBAGE', '#ef4444', 'bg-red-500/20'
+            # --- VERDICT LOGIC ---
             
-            # Rule #2: Stale Check - Check EF
-            if slope_ef_per_week < -0.1:
-                return 'MEH', '#3b82f6', 'bg-blue-500/20'
+            # 1. The Holy Grail: EF rising, decoupling stable or dropping
+            if slope_ef_per_week > 0.5 and slope_dec_per_week < 0.3:
+                return 'PEAKING', '#10b981', 'bg-emerald-500/20'
             
-            # Rule #3: The Win
-            return 'SOLID', '#10b981', 'bg-emerald-500/20'
+            # 2. Building Speed: EF rising fast, some drift is acceptable (progressive overload)
+            if slope_ef_per_week > 1.0 and slope_dec_per_week > 0.3:
+                return 'BUILDING', '#f97316', 'bg-orange-500/20'
+            
+            # 3. Fitness Loss: EF clearly declining
+            if slope_ef_per_week < -0.5:
+                return 'DETRAINING', '#ef4444', 'bg-red-500/20'
+            
+            # 4. Pure Drift: EF flat but decoupling increasing significantly
+            if abs(slope_ef_per_week) <= 0.5 and slope_dec_per_week > 1.0:
+                return 'DRIFTING', '#ef4444', 'bg-red-500/20'
+            
+            # 5. Default: modest gains or flat, manageable drift
+            return 'STABLE', '#3b82f6', 'bg-blue-500/20'
+            
         except:
             return 'N/A', '#71717a', 'bg-zinc-700'
     
@@ -4027,32 +5204,74 @@ Activity Breakdown: {activity_breakdown}
                     elif 'Stable' in trend_msg:
                         badge_color = 'grey'
                 
-                # 1. Weekly Volume Composition Card
-                volume_fig = self.generate_weekly_volume_chart()
-                if volume_fig:
-                    # Calculate volume verdict
+                # 1. Weekly Volume Composition Card (with Lens Switcher)
+                # Generate initial chart based on current lens
+                if self.volume_lens == 'mix':
+                    volume_fig = self.generate_training_mix_chart()
+                    vol_verdict, vol_color, vol_bg = self.calculate_mix_verdict(self.df)
+                    vol_subtitle = 'Weekly distribution by run type'
+                elif self.volume_lens == 'load':
+                    volume_fig = self.generate_load_chart()
+                    vol_verdict, vol_color, vol_bg = self.calculate_load_verdict(self.df)
+                    vol_subtitle = 'Weekly distribution by training stress'
+                elif self.volume_lens == 'zones':
+                    volume_fig = self.generate_hr_zones_chart()
+                    vol_verdict, vol_color, vol_bg = self.calculate_hr_zones_verdict(self.df)
+                    vol_subtitle = 'Weekly time in each heart rate zone'
+                else:
+                    volume_fig = self.generate_weekly_volume_chart()
                     vol_verdict, vol_color, vol_bg = self.calculate_volume_verdict(self.df)
-                    
+                    vol_subtitle = 'Breakdown in quality of miles (click any section to inspect runs)'
+                
+                if volume_fig:
                     # ADDED 'relative' class to the card so we can pin the icon
                     with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8 relative').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
                         
                         # The Silicon Valley Info Icon (ABSOLUTE POSITIONED)
-                        # top-5 right-5 puts it slightly higher/wider than the p-6 content padding
                         ui.icon('help_outline').classes('absolute top-5 right-5 text-zinc-500 hover:text-white transition-colors duration-200 cursor-pointer text-2xl').on(
                             'click', lambda: self.show_volume_info()
                         )
 
-                        # Header Row (Now simpler, just Title + Badge)
+                        # Header Row: Title + Verdict Badge
                         with ui.row().classes('w-full items-center gap-3 mb-1'):
                             ui.label('Training Volume').classes('text-xl font-bold text-white')
-                            self.volume_verdict_label = ui.label(f'[ {vol_verdict} ]').classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}').style(f'color: {vol_color};')
-                            
-                        ui.label('Breakdown in quality of miles (click any section to inspect runs)').classes('text-sm text-zinc-400 mb-4')
+                            self.volume_verdict_label = ui.label(f'{vol_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}').style(f'color: {vol_color};')
                         
-                        # Chart with zoom binding
-                        self.volume_chart = ui.plotly(volume_fig).classes('w-full').style('cursor: pointer')
-                        self.volume_chart.on('plotly_relayout', self.handle_volume_zoom)
-                        self.volume_chart.on('plotly_click', self.handle_bar_click)
+                        # Subtitle (lens-adaptive)
+                        self.volume_subtitle_label = ui.label(vol_subtitle).classes('text-sm text-zinc-400 mb-3')
+                        
+                        # === SEGMENTED TOGGLE (Pill Group) ===
+                        def switch_lens(lens):
+                            self.volume_lens = lens
+                            # Update button styles
+                            for l, btn in self._lens_buttons.items():
+                                if l == lens:
+                                    btn.classes(replace='text-sm px-4 py-1.5 rounded-full font-medium transition-all duration-200 bg-zinc-700 text-white')
+                                    btn.style(replace='min-height: 0; line-height: 1; color: white !important;')
+                                else:
+                                    btn.classes(replace='text-sm px-4 py-1.5 rounded-full font-medium transition-all duration-200')
+                                    btn.style(replace='min-height: 0; line-height: 1; color: #a1a1aa !important;')
+                            self.refresh_volume_card()
+                        
+                        self._lens_buttons = {}
+                        with ui.row().classes('w-full gap-1 mb-4 p-1 bg-zinc-800/50 rounded-full').style('width: fit-content;'):
+                            for lens_key, lens_label in [('quality', 'Quality'), ('mix', 'Training Mix'), ('load', 'Load'), ('zones', 'HR Zones')]:
+                                is_active = self.volume_lens == lens_key
+                                btn = ui.button(lens_label, on_click=lambda lk=lens_key: switch_lens(lk)).props('flat no-caps')
+                                if is_active:
+                                    btn.classes('text-sm px-4 py-1.5 rounded-full font-medium transition-all duration-200 bg-zinc-700 text-white')
+                                    btn.style('min-height: 0; line-height: 1; color: white !important;')
+                                else:
+                                    btn.classes('text-sm px-4 py-1.5 rounded-full font-medium transition-all duration-200')
+                                    btn.style('min-height: 0; line-height: 1; color: #a1a1aa !important;')
+                                self._lens_buttons[lens_key] = btn
+                        
+                        # === CHART CONTAINER (fixed height to prevent page jump) ===
+                        self.volume_card_container = ui.column().classes('w-full').style('min-height: 320px;')
+                        with self.volume_card_container:
+                            self.volume_chart = ui.plotly(volume_fig).classes('w-full').style('cursor: pointer')
+                            self.volume_chart.on('plotly_relayout', self.handle_volume_zoom)
+                            self.volume_chart.on('plotly_click', self.handle_bar_click)
                 
                 # 2. Efficiency & Decoupling Card (with unified dual-metric stats bar)
                 efficiency_fig = self.generate_efficiency_decoupling_chart()
@@ -4064,7 +5283,7 @@ Activity Breakdown: {activity_breakdown}
                         # Header with verdict badge
                         with ui.row().classes('w-full items-center gap-3 mb-1'):
                             ui.label('Aerobic Efficiency').classes('text-xl font-bold text-white')
-                            self.efficiency_verdict_label = ui.label(f'[ {eff_verdict} ]').classes(f'text-sm font-bold px-3 py-1 rounded {eff_bg}').style(f'color: {eff_color};')
+                            self.efficiency_verdict_label = ui.label(f'{eff_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {eff_bg}').style(f'color: {eff_color};')
                         ui.label('Running efficiency vs. cardiovascular drift over time').classes('text-sm text-zinc-400 mb-4')
                         
                         # Calculate consistency text for EF
@@ -4129,7 +5348,7 @@ Activity Breakdown: {activity_breakdown}
                         # Header with verdict badge
                         with ui.row().classes('w-full items-center gap-3 mb-1'):
                             ui.label('Running Mechanics').classes('text-xl font-bold text-white')
-                            self.cadence_verdict_label = ui.label(f'[ {cad_verdict} ]').classes(f'text-sm font-bold px-3 py-1 rounded {cad_bg}').style(f'color: {cad_color};')
+                            self.cadence_verdict_label = ui.label(f'{cad_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {cad_bg}').style(f'color: {cad_color};')
                         ui.label('Cadence trend showing turnover consistency').classes('text-sm text-zinc-400 mb-4')
                         
                         # Chart with zoom binding
@@ -4219,7 +5438,7 @@ Activity Breakdown: {activity_breakdown}
             # Update Efficiency Verdict
             df_for_verdict = df_zoomed if 'xaxis.range[0]' in e.args else self.df
             eff_verdict, eff_color, eff_bg = self.calculate_efficiency_verdict(df_for_verdict)
-            self.efficiency_verdict_label.set_text(f'[ {eff_verdict} ]')
+            self.efficiency_verdict_label.set_text(f'{eff_verdict}')
             self.efficiency_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {eff_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-zinc-700')
             self.efficiency_verdict_label.style(f'color: {eff_color};')
                 
@@ -4231,25 +5450,31 @@ Activity Breakdown: {activity_breakdown}
         """
         Handle zoom events on Volume Chart (Categorical Axis).
         Translates index ranges to data slices.
+        Lens-aware: uses the correct verdict calculator for the current lens.
         """
         try:
-            if 'xaxis.range[0]' in e.args and 'xaxis.range[1]' in e.args:
-                # Get indices (float)
+            # Determine the correct verdict calculator based on current lens
+            if self.volume_lens == 'mix':
+                vol_verdict, vol_color, vol_bg = self.calculate_mix_verdict(self.df)
+            elif self.volume_lens == 'load':
+                vol_verdict, vol_color, vol_bg = self.calculate_load_verdict(self.df)
+            elif self.volume_lens == 'zones':
+                vol_verdict, vol_color, vol_bg = self.calculate_hr_zones_verdict(self.df)
+            elif 'xaxis.range[0]' in e.args and 'xaxis.range[1]' in e.args:
+                # Quality lens with zoom — recalculate with slice
                 idx_start = e.args['xaxis.range[0]']
                 idx_end = e.args['xaxis.range[1]']
-                
-                # Recalculate with slice
                 vol_verdict, vol_color, vol_bg = self.calculate_volume_verdict(
                     start_index=idx_start, 
                     end_index=idx_end
                 )
             else:
-                # Reset / Autorange
+                # Quality lens — reset / autorange
                 vol_verdict, vol_color, vol_bg = self.calculate_volume_verdict()
             
             # Update UI
-            self.volume_verdict_label.set_text(f'[ {vol_verdict} ]')
-            self.volume_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-zinc-700 bg-zinc-800 text-zinc-500')
+            self.volume_verdict_label.set_text(f'{vol_verdict}')
+            self.volume_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-orange-500/20 bg-zinc-700 bg-zinc-800 text-zinc-500')
             self.volume_verdict_label.style(f'color: {vol_color};')
             
         except Exception as ex:
@@ -4285,7 +5510,7 @@ Activity Breakdown: {activity_breakdown}
                 return
             
             # Update verdict label
-            self.cadence_verdict_label.set_text(f'[ {cad_verdict} ]')
+            self.cadence_verdict_label.set_text(f'{cad_verdict}')
             self.cadence_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {cad_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-zinc-700')
             self.cadence_verdict_label.style(f'color: {cad_color};')
                 
@@ -4996,6 +6221,11 @@ def _parse_fit_files_for_clipboard(activity_info_list):
                 
                 # Calculate average gradient and cadence for this lap
                 lap_start = lap['start_time']
+
+                # --- Make lap_start timezone-aware if needed ---
+                if lap_start and lap_start.tzinfo is None:
+                    lap_start = lap_start.replace(tzinfo=timezone.utc).astimezone()
+
                 lap_end = lap_start + pd.Timedelta(seconds=lap['total_elapsed_time'])
                 
                 lap_elevations = []

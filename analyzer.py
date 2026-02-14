@@ -76,7 +76,7 @@ def classify_split(cadence, hr, max_hr, grade):
     if hr > 0 and hr <= z2_limit: return 'STRUCTURAL'
     if cadence >= 160: return 'HIGH QUALITY'
     else: return 'BROKEN'
-    
+
 def minetti_cost_of_running(grade):
     grade = np.clip(grade, -0.45, 0.45)
     cost = 155.4*(grade**5) - 30.4*(grade**4) - 43.3*(grade**3) + 46.3*(grade**2) + 19.5*grade + 3.6
@@ -95,34 +95,38 @@ class FitAnalyzer:
     
     def get_training_label(self, aerobic, anaerobic):
         """
+        Selective Adaptation Filter.
         Returns custom (Label, Color_Class) based on Training Effect.
-        Logic: MAX POWER, VO2 MAX, THRESHOLD, MAINTAINING, RECOVERY.
-        
-        Args:
-            aerobic: Aerobic training effect (0.0 - 5.0)
-            anaerobic: Anaerobic training effect (0.0 - 5.0)
-            
-        Returns:
-            Tuple of (label_text, color_classes)
+        COACHING LOGIC: Filters out 'accidental' anaerobic noise.
         """
-        aerobic = float(aerobic or 0)
-        anaerobic = float(anaerobic or 0)
-        
-        # 1. Anaerobic (High Intensity)
-        if anaerobic > 2.0:
-            return "MAX POWER", "text-purple-400 border-purple-500/30"
-        # 2. VO2 Max (Top End Aerobic)
-        elif aerobic >= 4.0:
-            return "VO2 MAX", "text-red-400 border-red-500/30"
-        # 3. Threshold (High Aerobic)
-        elif aerobic >= 3.5:
-            return "THRESHOLD", "text-orange-400 border-orange-500/30"
-        # 4. Base (Low Aerobic)
-        elif aerobic < 2.5:
-            return "RECOVERY", "text-emerald-400 border-emerald-500/30"
-        # 5. Moderate Aerobic (Zone 2-3)
-        else:
-            return "MAINTAINING", "text-blue-400 border-blue-500/30"
+        # Ensure inputs are floats (Handle None/Missing data safely)
+        try:
+            aer = float(aerobic or 0)
+            ana = float(anaerobic or 0)
+        except (ValueError, TypeError):
+            return None, None
+
+        # 1. MAX POWER (The Purple Zone)
+        # 3.5+ is undeniable sprint work.
+        if ana >= 3.5:
+            return "🚀 MAX POWER", "text-purple-400"
+
+        # 2. ANAEROBIC CAPACITY (The Orange Zone)
+        # The Threshold: 2.5 (Catches your Flat Sprints).
+        # The Filter: Must be within 1.0 of Aerobic score (Ignores Long Runs with hills).
+        if ana >= 2.5 and ana > (aer - 1.0):
+            return "🔋 ANAEROBIC", "text-orange-400"
+            
+        # 3. VO2 MAX (The Red Zone)
+        if aer >= 4.2:
+            return "🫀 VO2 MAX", "text-red-400"
+
+        # 4. THRESHOLD (The Emerald Zone)
+        if aer >= 3.5:
+            return "📈 THRESHOLD", "text-emerald-400"
+
+        # 5. BASE (Clean UI)
+        return None, None
     
     def analyze_file(self, filename: str) -> Optional[Dict[str, Any]]:
         try:
@@ -350,8 +354,8 @@ class FitAnalyzer:
         
         # Get Training Label
         te_label, te_color = self.get_training_label(
-            metadata.get('total_training_effect'), 
-            metadata.get('total_anaerobic_training_effect')
+            metadata.get('total_training_effect', 0), 
+            metadata.get('total_anaerobic_training_effect', 0)
         )
 
         # --- 8.. BURST DETECTION (Section 3.1) ---
