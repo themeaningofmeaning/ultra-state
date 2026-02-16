@@ -6,9 +6,11 @@ Garmin FIT Analyzer
 import os
 import time
 import json
+import copy
 import hashlib
 import sqlite3
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 # Third-party imports
@@ -20,6 +22,15 @@ from nicegui import ui, run
 # Local imports
 from analyzer import FitAnalyzer, analyze_form, classify_split
 from db import DatabaseManager, calculate_file_hash
+
+
+class MuteFrameworkNoise(logging.Filter):
+    def filter(self, record):
+        # Filter out the specific NiceGUI warning about event listeners
+        return "Event listeners changed after initial definition" not in record.getMessage()
+
+
+MAP_PAYLOAD_VERSION = 4
 
 
 # --- MAIN APPLICATION CLASS ---
@@ -66,6 +77,14 @@ class GarminAnalyzerApp:
 
         # Initialize the volume data container
         self.weekly_volume_data = None
+
+        # LRU-ish cache for parsed activity detail payloads (avoids reparsing FIT on reopen)
+        self.activity_detail_cache = {}
+        self.activity_detail_cache_size = 24
+        self.activity_detail_cache_version = 2
+
+        # Background backfill task for legacy map payloads
+        self._map_backfill_task = None
         
         # Build UI
         self.build_ui()
@@ -129,6 +148,295 @@ class GarminAnalyzerApp:
             distance_stream.append(cumulative_distance)
         
         return distance_stream
+
+    def _normalize_bounds(self, bounds_value):
+        """Validate and normalize bounds into [[min_lat, min_lon], [max_lat, max_lon]]."""
+        try:
+            if not isinstance(bounds_value, (list, tuple)) or len(bounds_value) != 2:
+                return None
+            if not isinstance(bounds_value[0], (list, tuple)) or not isinstance(bounds_value[1], (list, tuple)):
+                return None
+            if len(bounds_value[0]) != 2 or len(bounds_value[1]) != 2:
+                return None
+
+            lat1 = float(bounds_value[0][0])
+            lon1 = float(bounds_value[0][1])
+            lat2 = float(bounds_value[1][0])
+            lon2 = float(bounds_value[1][1])
+
+            min_lat, max_lat = sorted([lat1, lat2])
+            min_lon, max_lon = sorted([lon1, lon2])
+
+            if not (-90 <= min_lat <= 90 and -90 <= max_lat <= 90):
+                return None
+            if not (-180 <= min_lon <= 180 and -180 <= max_lon <= 180):
+                return None
+            if abs(max_lat - min_lat) < 1e-6:
+                min_lat -= 0.0005
+                max_lat += 0.0005
+            if abs(max_lon - min_lon) < 1e-6:
+                min_lon -= 0.0005
+                max_lon += 0.0005
+
+            return [[min_lat, min_lon], [max_lat, max_lon]]
+        except Exception:
+            return None
+
+    def _hex_to_rgb(self, color):
+        """Convert #RRGGBB to (r, g, b), or None for invalid input."""
+        if not isinstance(color, str):
+            return None
+        color = color.strip()
+        if not color.startswith('#') or len(color) != 7:
+            return None
+        try:
+            return (
+                int(color[1:3], 16),
+                int(color[3:5], 16),
+                int(color[5:7], 16),
+            )
+        except Exception:
+            return None
+
+    def _rgb_to_hex(self, r, g, b):
+        """Convert RGB ints to #RRGGBB."""
+        r = max(0, min(255, int(r)))
+        g = max(0, min(255, int(g)))
+        b = max(0, min(255, int(b)))
+        return f'#{r:02x}{g:02x}{b:02x}'
+
+    def _multi_color_from_t(self, t):
+        """Map normalized t (0..1) to Garmin 5-color gradient."""
+        t = max(0.0, min(1.0, float(t)))
+        colors = [
+            (0, 0, 255),    # Blue
+            (0, 255, 0),    # Green
+            (255, 255, 0),  # Yellow
+            (255, 165, 0),  # Orange
+            (255, 0, 0),    # Red
+        ]
+        idx = int(t * 4)
+        if idx >= 4:
+            idx = 3
+        ratio = (t * 4) - idx
+        c1, c2 = colors[idx], colors[idx + 1]
+        r = int(c1[0] + (c2[0] - c1[0]) * ratio)
+        g = int(c1[1] + (c2[1] - c1[1]) * ratio)
+        b = int(c1[2] + (c2[2] - c1[2]) * ratio)
+        return self._rgb_to_hex(r, g, b)
+
+    def _projection_on_dual_tone(self, rgb):
+        """Project RGB onto dual-tone Zinc->Emerald ramp and return (t, distance)."""
+        start = (113.0, 113.0, 122.0)  # Zinc-500
+        end = (52.0, 211.0, 153.0)     # Emerald-400
+        vx, vy, vz = (end[0] - start[0], end[1] - start[1], end[2] - start[2])
+        wx, wy, wz = (rgb[0] - start[0], rgb[1] - start[1], rgb[2] - start[2])
+        vv = vx * vx + vy * vy + vz * vz
+        if vv <= 0:
+            return 0.5, float('inf')
+        t = (wx * vx + wy * vy + wz * vz) / vv
+        t = max(0.0, min(1.0, t))
+        px = start[0] + t * vx
+        py = start[1] + t * vy
+        pz = start[2] + t * vz
+        dist = ((rgb[0] - px) ** 2 + (rgb[1] - py) ** 2 + (rgb[2] - pz) ** 2) ** 0.5
+        return t, dist
+
+    def _looks_like_dual_tone_segments(self, segments):
+        """Heuristic: detect old Zinc->Emerald palette so we can migrate to 5-color scale."""
+        if not isinstance(segments, list) or not segments:
+            return False
+
+        sample = segments[: min(120, len(segments))]
+        valid = 0
+        near_line = 0
+        for seg in sample:
+            if not isinstance(seg, (list, tuple)) or len(seg) < 5:
+                continue
+            rgb = self._hex_to_rgb(seg[4])
+            if rgb is None:
+                continue
+            valid += 1
+            _, dist = self._projection_on_dual_tone(rgb)
+            if dist <= 10.0:
+                near_line += 1
+
+        if valid < 10:
+            return False
+        return (near_line / valid) >= 0.85
+
+    def _convert_dual_tone_segments_to_multicolor(self, segments):
+        """Convert old dual-tone segment colors to the Garmin 5-color palette."""
+        converted = []
+        for seg in segments:
+            if not isinstance(seg, (list, tuple)) or len(seg) < 5:
+                converted.append(seg)
+                continue
+            rgb = self._hex_to_rgb(seg[4])
+            if rgb is None:
+                converted.append(list(seg))
+                continue
+            t, _ = self._projection_on_dual_tone(rgb)
+            converted.append([seg[0], seg[1], seg[2], seg[3], self._multi_color_from_t(t)])
+        return converted
+
+    def _build_map_payload_from_segments(self, route_segments, max_segments=500):
+        """Convert legacy route_segments into versioned map payload with robust bounds."""
+        if not isinstance(route_segments, list) or not route_segments:
+            return None
+
+        cleaned = []
+        for seg in route_segments:
+            try:
+                if not isinstance(seg, (list, tuple)) or len(seg) < 4:
+                    continue
+                lat1, lon1, lat2, lon2 = float(seg[0]), float(seg[1]), float(seg[2]), float(seg[3])
+                if not (-90 <= lat1 <= 90 and -180 <= lon1 <= 180 and -90 <= lat2 <= 90 and -180 <= lon2 <= 180):
+                    continue
+                if (abs(lat1) < 1e-6 and abs(lon1) < 1e-6) or (abs(lat2) < 1e-6 and abs(lon2) < 1e-6):
+                    continue
+                pace_color = seg[4] if len(seg) > 4 and isinstance(seg[4], str) and seg[4].startswith('#') else '#10b981'
+                hr_color = seg[5] if len(seg) > 5 and isinstance(seg[5], str) and seg[5].startswith('#') else None
+                normalized = [lat1, lon1, lat2, lon2, pace_color]
+                if hr_color:
+                    normalized.append(hr_color)
+                cleaned.append(normalized)
+            except Exception:
+                continue
+
+        if not cleaned:
+            return None
+
+        # Migrate old dual-tone color payloads to restored multi-color gradient.
+        if self._looks_like_dual_tone_segments(cleaned):
+            cleaned = self._convert_dual_tone_segments_to_multicolor(cleaned)
+
+        if len(cleaned) > max_segments:
+            step = max(1, len(cleaned) // max_segments)
+            sampled = cleaned[::step]
+            if sampled[-1] != cleaned[-1]:
+                sampled.append(cleaned[-1])
+            cleaned = sampled
+
+        lats = [s[0] for s in cleaned] + [s[2] for s in cleaned]
+        lons = [s[1] for s in cleaned] + [s[3] for s in cleaned]
+        if not lats or not lons:
+            return None
+
+        sorted_lats = sorted(lats)
+        sorted_lons = sorted(lons)
+
+        def percentile(values, p):
+            if not values:
+                return 0.0
+            idx = (len(values) - 1) * p
+            lo = int(idx)
+            hi = min(lo + 1, len(values) - 1)
+            if lo == hi:
+                return float(values[lo])
+            frac = idx - lo
+            return float(values[lo] + (values[hi] - values[lo]) * frac)
+
+        if len(sorted_lats) > 20:
+            min_lat = percentile(sorted_lats, 0.005)
+            max_lat = percentile(sorted_lats, 0.995)
+            min_lon = percentile(sorted_lons, 0.005)
+            max_lon = percentile(sorted_lons, 0.995)
+        else:
+            min_lat, max_lat = float(sorted_lats[0]), float(sorted_lats[-1])
+            min_lon, max_lon = float(sorted_lons[0]), float(sorted_lons[-1])
+
+        bounds = self._normalize_bounds([[min_lat, min_lon], [max_lat, max_lon]])
+        if not bounds:
+            return None
+
+        center = [
+            (bounds[0][0] + bounds[1][0]) / 2,
+            (bounds[0][1] + bounds[1][1]) / 2,
+        ]
+
+        return {
+            'v': MAP_PAYLOAD_VERSION,
+            'segments': cleaned,
+            'bounds': bounds,
+            'center': center,
+            'segment_count': len(cleaned),
+        }
+
+    def _activity_needs_map_payload_backfill(self, activity):
+        """Decide whether an activity needs map payload migration."""
+        if not isinstance(activity, dict):
+            return False
+        map_payload = activity.get('map_payload')
+        if not isinstance(map_payload, dict):
+            return True
+        version = int(activity.get('map_payload_version') or map_payload.get('v') or 1)
+        if version < MAP_PAYLOAD_VERSION:
+            return True
+        if not isinstance(map_payload.get('segments'), list) or not map_payload.get('segments'):
+            return True
+        if not self._normalize_bounds(map_payload.get('bounds')):
+            return True
+        return False
+
+    def _get_or_backfill_map_payload(self, activity):
+        """Return normalized map payload, creating/persisting current-version payload when needed."""
+        if not isinstance(activity, dict):
+            return None
+
+        map_payload = activity.get('map_payload')
+        if isinstance(map_payload, dict):
+            bounds = self._normalize_bounds(map_payload.get('bounds'))
+            segments = map_payload.get('segments')
+            version = int(activity.get('map_payload_version') or map_payload.get('v') or 1)
+            if version >= MAP_PAYLOAD_VERSION and bounds and isinstance(segments, list) and segments:
+                map_payload['bounds'] = bounds
+                activity['map_payload'] = map_payload
+                activity['map_payload_version'] = version
+                return map_payload
+
+        legacy_segments = activity.get('route_segments')
+        if (not legacy_segments) and isinstance(map_payload, dict):
+            legacy_segments = map_payload.get('segments')
+
+        new_payload = self._build_map_payload_from_segments(legacy_segments, max_segments=500)
+        if not new_payload:
+            return None
+
+        activity['map_payload'] = new_payload
+        activity['map_payload_version'] = new_payload.get('v', MAP_PAYLOAD_VERSION)
+        activity['route_segments'] = new_payload.get('segments', [])
+        activity['bounds'] = new_payload.get('bounds', [[0, 0], [0, 0]])
+
+        activity_hash = activity.get('hash') or activity.get('db_hash')
+        if activity_hash:
+            try:
+                self.db.update_activity_map_payload(
+                    activity_hash,
+                    new_payload,
+                    route_segments=new_payload.get('segments'),
+                    bounds=new_payload.get('bounds'),
+                    map_payload_version=new_payload.get('v', MAP_PAYLOAD_VERSION),
+                )
+            except Exception as ex:
+                print(f"Map payload backfill warning for {activity_hash}: {ex}")
+
+        return new_payload
+
+    async def _backfill_map_payloads_for_loaded_activities(self):
+        """Background migration for loaded activities to versioned map payloads."""
+        if not self.activities_data:
+            return
+
+        for idx, activity in enumerate(self.activities_data):
+            try:
+                if self._activity_needs_map_payload_backfill(activity):
+                    self._get_or_backfill_map_payload(activity)
+            except Exception as ex:
+                print(f"Background map payload backfill warning: {ex}")
+
+            if idx % 20 == 0:
+                await asyncio.sleep(0)
     
     async def get_activity_detail(self, activity_hash):
         """
@@ -152,10 +460,32 @@ class GarminAnalyzerApp:
         if not activity:
             return None
 
+        # Ensure versioned map payload exists/normalized for this activity metadata.
+        # This is lightweight and avoids stale legacy bounds in modal rendering.
+        try:
+            self._get_or_backfill_map_payload(activity)
+        except Exception as ex:
+            print(f"Map payload prep warning for {activity_hash}: {ex}")
+
         # 2. Locate FIT file on disk
         fit_file_path = self._locate_fit_file(activity)
         if not fit_file_path:
             return {'error': 'file_not_found', 'activity': activity}
+
+        file_mtime = os.path.getmtime(fit_file_path) if os.path.exists(fit_file_path) else None
+
+        # 2.5 Fast path: return cached detail payload when source file has not changed
+        cached = self.activity_detail_cache.get(activity_hash)
+        if (
+            cached
+            and cached.get('file_path') == fit_file_path
+            and cached.get('file_mtime') == file_mtime
+            and cached.get('cache_version') == self.activity_detail_cache_version
+        ):
+            payload = copy.deepcopy(cached.get('payload', {}))
+            if payload:
+                payload['activity_metadata'] = activity
+                return payload
 
         # 3. Parse FIT file using fitparse (run in thread to avoid blocking)
         try:
@@ -170,6 +500,15 @@ class GarminAnalyzerApp:
                 cadence_stream = []
                 distance_stream = []
                 timestamps = []
+                
+                # --- NEW: Advanced Form Streams ---
+                vertical_oscillation = []
+                stance_time = []
+                vertical_ratio = []
+                step_length = [] # aka stride_length
+                
+                # (Route extraction removed - using pre-calculated DB data)
+                # ---------------------------------------------------------
 
                 for record in fitfile.get_messages("record"):
                     vals = record.get_values()
@@ -191,11 +530,23 @@ class GarminAnalyzerApp:
                     )
                     cadence_stream.append(vals.get('cadence'))
                     distance_stream.append(vals.get('distance'))
+                    
+                    # --- NEW: Extract Advanced Metrics ---
+                    # Keep as None if missing (do not coerce to 0)
+                    vertical_oscillation.append(vals.get('vertical_oscillation'))
+                    stance_time.append(vals.get('stance_time') or vals.get('ground_contact_time'))
+                    vertical_ratio.append(vals.get('vertical_ratio'))
+                    step_length.append(vals.get('step_length') or vals.get('stride_length'))
+                    
+                    # (Route point extraction removed)
+                    # -----------------------------------------------------
 
                 # 5. Extract lap data
                 lap_data = []
                 for lap_msg in fitfile.get_messages("lap"):
                     vals = lap_msg.get_values()
+                    if not vals:
+                        continue
                     
                     # --- TIMEZONE FIX ---
                     if vals.get('start_time'):
@@ -258,14 +609,24 @@ class GarminAnalyzerApp:
                     'distance_stream': distance_stream,
                     'lap_data': lap_data,
                     'timestamps': timestamps,
-                    'session_data': session_data
+                    'session_data': session_data,
+                    # --- NEW: Advanced Form Streams ---
+                    'vertical_oscillation': vertical_oscillation,
+                    'stance_time': stance_time,
+                    'vertical_ratio': vertical_ratio,
+                    'step_length': step_length,
+                    'step_length': step_length,
+                    # --- NEW: Route Data with Speed ---
+                    # ----------------------------------
+                    # ----------------------------------
+                    # ----------------------------------
                 }
 
             # Run parsing in background thread
             result = await run.io_bound(parse_fit)
             
             # Check if parsing failed
-            if result is None:
+            if result is None or not isinstance(result, dict):
                 return {'error': 'parse_error', 'activity': activity, 'message': 'Failed to parse FIT file'}
 
             # 6. Get max HR (priority: user profile > session max > observed max)
@@ -281,6 +642,18 @@ class GarminAnalyzerApp:
 
             result['max_hr'] = max_hr
             result['activity_metadata'] = activity
+
+            # Save detail payload cache keyed by activity hash + file version
+            self.activity_detail_cache[activity_hash] = {
+                'file_path': fit_file_path,
+                'file_mtime': file_mtime,
+                'cache_version': self.activity_detail_cache_version,
+                'payload': copy.deepcopy(result),
+            }
+            if len(self.activity_detail_cache) > self.activity_detail_cache_size:
+                oldest_key = next(iter(self.activity_detail_cache))
+                if oldest_key != activity_hash:
+                    self.activity_detail_cache.pop(oldest_key, None)
 
             return result
 
@@ -847,15 +1220,15 @@ class GarminAnalyzerApp:
 
         # Update layout
         fig.update_layout(
-            title='Time in Heart Rate Zones',
             xaxis_title='Time (minutes)',
             yaxis_title='',
             template='plotly_dark',
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             height=300,
-            margin=dict(l=20, r=20, t=40, b=20),
-            showlegend=False
+            margin=dict(l=20, r=20, t=20, b=20), # Reduced top margin since title is gone
+            showlegend=False,
+            font=dict(color='#a1a1aa') # Zinc-400
         )
         
         # Completely hide the modebar
@@ -863,141 +1236,264 @@ class GarminAnalyzerApp:
 
         return fig
     
-    def create_cadence_elevation_chart(self, distance_stream, cadence_stream, elevation_stream, use_miles=True):
+    def create_form_analysis_chart(self, distance_stream, cadence_stream, elevation_stream, 
+                                 timestamps=None, vertical_oscillation=None, stance_time=None, 
+                                 vertical_ratio=None, step_length=None, use_miles=True):
         """
-        Create dual-axis chart showing cadence vs elevation over distance.
-        
-        Args:
-            distance_stream: List[float] - distance in meters
-            cadence_stream: List[int] - cadence in steps per minute
-            elevation_stream: List[float] - elevation in meters
-            use_miles: bool - convert distance to miles (default True)
-        
-        Returns:
-            plotly.graph_objects.Figure - configured chart
+        Create Pro Form Analysis Chart (Apple Health Style).
+        Visualizes Cadence (Grey Line) + Efficiency Status (Colored Markers).
         """
         from plotly.subplots import make_subplots
         import plotly.graph_objects as go
+        import pandas as pd
+        import numpy as np
+
+        # 1. VALIDATION & ALIGNMENT
+        # We perform an intersection of valid data. 
+        # Crucial: Arrays might be different lengths, so crop to minimum.
+        min_len = min(len(distance_stream), len(cadence_stream), len(elevation_stream))
         
-        # Filter out None values while maintaining alignment
-        valid_indices = [
-            i for i in range(min(len(distance_stream), len(cadence_stream), len(elevation_stream)))
-            if distance_stream[i] is not None and cadence_stream[i] is not None
-        ]
+        # Prepare arrays (crop to min_len)
+        dist = np.array(distance_stream[:min_len])
+        cad = np.array(cadence_stream[:min_len])
+        elev = np.array(elevation_stream[:min_len])
         
-        if not valid_indices:
-            # Return empty figure if no valid data
-            fig = go.Figure()
-            fig.update_layout(
-                title='No valid data available',
-                template='plotly_dark',
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)'
-            )
-            return fig
+        # Optional Streams (Handle None or Mismatched lengths)
+        def prepare_optional(stream, default_val=None):
+            if stream is None or len(stream) == 0: return np.full(min_len, default_val)
+            # Crop or Pad
+            arr = np.array(stream[:min_len])
+            if len(arr) < min_len:
+                return np.pad(arr, (0, min_len - len(arr)), constant_values=default_val)
+            return arr
+
+        vo = prepare_optional(vertical_oscillation) # mm
+        gct = prepare_optional(stance_time)         # ms
+        vr = prepare_optional(vertical_ratio)       # %
+        sl = prepare_optional(step_length)          # mm (needs /1000 for m)
+
+        # Timestamps alignment
+        time_labels = []
+        if timestamps:
+            valid_timestamps = timestamps[:min_len]
+            if valid_timestamps:
+                start_time = valid_timestamps[0]
+                for ts in valid_timestamps:
+                    if ts:
+                        delta = ts - start_time
+                        total_seconds = int(delta.total_seconds())
+                        hours = total_seconds // 3600
+                        minutes = (total_seconds % 3600) // 60
+                        seconds = total_seconds % 60
+                        if hours > 0:
+                            time_labels.append(f"⏱️ Time: {hours}:{minutes:02d}:{seconds:02d}")
+                        else:
+                            time_labels.append(f"⏱️ Time: {minutes}:{seconds:02d}")
+                    else:
+                        time_labels.append("⏱️ Time: --:--")
         
-        # Extract valid data
-        distance_valid = [distance_stream[i] for i in valid_indices]
-        # Garmin records cadence as steps per minute for ONE foot, so double it for total SPM
-        cadence_valid = [cadence_stream[i] * 2 for i in valid_indices]
-        elevation_valid = [elevation_stream[i] if elevation_stream[i] is not None else 0 for i in valid_indices]
+        if not time_labels:
+            time_labels = ["⏱️ Time: --:--" for _ in range(min_len)]
+
+        # 2. DATA CLEANING & SMOOTHING (Grey Line)
+        # Filter out stops (Cadence <= 0)
+        # Using a mask allows us to break the line (connectgaps=False)
+        cad_float = np.array(cad, dtype=float)
+        cad_float[cad_float <= 0] = np.nan
         
-        # Smooth cadence data with rolling average to reduce noise
-        def rolling_average(data, window=30):
-            """Apply rolling average to smooth noisy data."""
-            smoothed = []
-            for i in range(len(data)):
-                start = max(0, i - window // 2)
-                end = min(len(data), i + window // 2 + 1)
-                smoothed.append(sum(data[start:end]) / (end - start))
-            return smoothed
+        # Apply 15s Rolling Average (Smooth the line)
+        # We smooth even lightly to make it look "Apple-like"
+        cad_series = pd.Series(cad_float)
+        cad_smoothed = cad_series.rolling(window=15, min_periods=1, center=True).mean()
         
-        cadence_smoothed = rolling_average(cadence_valid, window=30)
+        # Re-apply gaps (Stops should be visual breaks)
+        mask_gaps = (cad_float <= 0) | (np.isnan(cad_float))
+        cad_smoothed[mask_gaps] = np.nan
+
+        # 3. WATERFALL LOGIC (Marker Colors & Verdicts)
+        marker_colors = []
+        verdicts = []
+        why_metrics = [] # Diagnostic string
         
-        # Convert units
+        # Constants
+        C_GREEN = '#32D74B' 
+        C_YELLOW = '#FFD60A'
+        C_RED = '#FF453A'
+        C_GREY = '#8E8E93' # Fallback
+
+        # Iterate through the aligned data
+        for i in range(min_len):
+            # Safe access to current values
+            c_val = cad_smoothed[i] if not np.isnan(cad_smoothed[i]) else 0
+            vr_val = vr[i]
+            gct_val = gct[i]
+            
+            # --- Logic ---
+            status = None
+            
+            # Priority 1: Vertical Ratio
+            if vr_val is not None and vr_val > 0:
+                if vr_val < 8.0:
+                    status = (C_GREEN, "✅ Elite Efficiency")
+                elif vr_val <= 10.0:
+                    status = (C_YELLOW, "⚖️ Good Form")
+                else:
+                    status = (C_RED, "⚠️ High Bounce")
+            
+            # Priority 2: GCT (if Ratio missing)
+            elif gct_val is not None and gct_val > 0:
+                if gct_val < 250:
+                    status = (C_GREEN, "🚀 Fast Reactivity")
+                elif gct_val <= 300:
+                    status = (C_YELLOW, "🏃 Balanced")
+                else:
+                    status = (C_RED, "🛑 Long Ground Contact")
+                    
+            # Priority 3: Cadence (Fallback)
+            elif c_val > 0:
+                if c_val > 170:
+                    status = (C_GREEN, "✅ Optimal Cadence")
+                elif c_val >= 160:
+                    status = (C_YELLOW, "🛠 Improvement Zone")
+                else:
+                    status = (C_RED, "⚠️ Overstriding Risk")
+            
+            else:
+                status = (C_GREY, "⏸️ Stopped")
+
+            marker_colors.append(status[0])
+            verdicts.append(status[1])
+            
+            # Diagnostic String
+            # "📏 Stride: 1.1m | ⏱️ GCT: 240ms | ↕️ Vert Osc: 8.2cm"
+            diag = []
+            if sl[i] and sl[i] > 0: diag.append(f"📏 Stride: {sl[i]/1000:.2f}m")
+            if gct_val and gct_val > 0: diag.append(f"⏱️ GCT: {int(gct_val)}ms")
+            if vo[i] and vo[i] > 0: diag.append(f"↕️ Vert Osc: {vo[i]/10:.1f}cm")
+            
+            why_metrics.append(" | ".join(diag) if diag else "No advanced metrics")
+
+        # 4. MARKER OPTIMIZATION
+        # If activity > 2 hours (~7200 points), take every 5th point for markers
+        # The Line (Trace 1) stays full resolution. Markers (Trace 2) get subsampled.
+        step = 5 if min_len > 7200 else 1
+        
+        # Subsampled Indices for Scatter Trace
+        idx_sub = np.arange(0, min_len, step)
+        
+        # 5. CONVERT UNITS
         if use_miles:
-            distance_converted = [d / 1609.34 for d in distance_valid]
-            elevation_converted = [e * 3.28084 for e in elevation_valid]
-            distance_unit = 'mi'
-            elevation_unit = 'ft'
+            dist_units = "mi"
+            dist_conv = dist * 0.000621371
+            elev_units = "ft"
+            elev_conv = elev * 3.28084
         else:
-            distance_converted = [d / 1000 for d in distance_valid]
-            elevation_converted = elevation_valid
-            distance_unit = 'km'
-            elevation_unit = 'm'
-        
-        # Create figure with secondary y-axis
+            dist_units = "km"
+            dist_conv = dist / 1000
+            elev_conv = elev
+            elev_units = "m"
+
+        # 6. BUILD FIGURE
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         
-        # Add elevation trace (background, filled area)
+        # Trace 1: Elevation (Area - Background)
         fig.add_trace(
             go.Scatter(
-                x=distance_converted,
-                y=elevation_converted,
+                x=dist_conv,
+                y=elev_conv,
                 name="Elevation",
                 fill='tozeroy',
-                fillcolor='rgba(148, 163, 184, 0.2)',
-                line=dict(color='rgba(148, 163, 184, 0.4)', width=1),
-                hovertemplate=f'%{{y:.0f}} {elevation_unit}<extra></extra>'
+                mode='lines',
+                line=dict(color='#3f3f46', width=0), # Zinc-700ish, very subtle
+                fillcolor='rgba(63, 63, 70, 0.3)',
+                hoverinfo='skip' # Tooltip handled by the main trace
             ),
             secondary_y=True
         )
-        
-        # Add cadence trace (foreground, bold line)
+
+        # Trace 2: The Grey Line (Smoothed Cadence)
         fig.add_trace(
             go.Scatter(
-                x=distance_converted,
-                y=cadence_smoothed,
-                name="Cadence",
-                line=dict(color='#6366f1', width=3, shape='spline'),
-                hovertemplate='%{y:.0f} SPM<extra></extra>'
+                x=dist_conv,
+                y=cad_smoothed,
+                name="Trend",
+                mode='lines',
+                line=dict(color='#525252', width=2), # Neutral Grey
+                connectgaps=False,
+                hoverinfo='skip' # Tooltip mainly on markers
             ),
             secondary_y=False
         )
         
-        # Configure layout
+        # Trace 3: The Status Markers (Overlay)
+        # Using subsampled data
+        fig.add_trace(
+            go.Scatter(
+                x=dist_conv[idx_sub],
+                y=cad_smoothed[idx_sub],
+                name="Form Status",
+                mode='markers',
+                marker=dict(
+                    color=[marker_colors[i] for i in idx_sub],
+                    size=4, # Subtle but visible
+                    opacity=0.8
+                ),
+                # Custom Data for Tooltip
+                customdata=np.stack((
+                    [time_labels[i] for i in idx_sub],      # 0: Time
+                    [verdicts[i] for i in idx_sub],         # 1: Verdict
+                    [why_metrics[i] for i in idx_sub],      # 2: Diagnostic
+                    [elev_conv[i] for i in idx_sub]         # 3: Elev
+                ), axis=-1),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>" +
+                    f"📏 Distance: %{{x:.2f}} {dist_units}<br>" +
+                    f"🏔️ Elevation: %{{customdata[3]:.0f}} {elev_units}<br>" +
+                    "👟 Cadence: <b>%{y:.0f}</b> spm<br>" +
+                    "<br>" +
+                    "<i>%{customdata[2]}</i><br>" + # Diagnostic
+                    "<b>%{customdata[1]}</b>" +     # Verdict
+                    "<extra></extra>"
+                )
+            ),
+            secondary_y=False
+        )
+
+        # Layout
         fig.update_layout(
-            title='Cadence & Elevation Profile',
-            xaxis_title=f'Distance ({distance_unit})',
             template='plotly_dark',
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
-            height=300,
-            margin=dict(l=20, r=40, t=40, b=40),
-            showlegend=True,
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
-            ),
-            hovermode='x unified',
-            # Style hover tooltip for dark theme
-            hoverlabel=dict(
-                bgcolor='#18181b',  # zinc-900
-                font_size=13,
-                font_family='monospace',
-                font_color='white'
-            )
+            height=350,
+            margin=dict(l=20, r=20, t=20, b=40), # Reduced top margin
+            hovermode="x unified",
+            showlegend=False,
+            font=dict(family="Inter, sans-serif", size=12, color="#a1a1aa") # Zinc-400
         )
         
-        # Configure Y-axes
+        # Axes
         fig.update_yaxes(
-            title_text="Cadence (SPM)",
-            secondary_y=False,
-            range=[140, 200]  # Fixed range for running cadence
+            title_text="Cadence (SPM)", 
+            title_font=dict(color='#A1A1AA'),
+            tickfont=dict(color='#D4D4D8'),
+            secondary_y=False, 
+            gridcolor='#27272a', 
+            zeroline=False
         )
-        
         fig.update_yaxes(
-            title_text=f"Elevation ({elevation_unit})",
-            secondary_y=True,
-            rangemode='tozero'
+            title_text=f"Elevation ({elev_units})", 
+            title_font=dict(color='#A1A1AA'),
+            tickfont=dict(color='#D4D4D8'),
+            secondary_y=True, 
+            showgrid=False, 
+            zeroline=False
         )
-        
-        # Hide modebar
-        fig.update_layout(
-            modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']}
+        fig.update_xaxes(
+            title_text=f"Distance ({dist_units})", 
+            title_font=dict(color='#A1A1AA'),
+            tickfont=dict(color='#D4D4D8'),
+            gridcolor='#27272a', 
+            zeroline=False
         )
         
         return fig
@@ -1130,36 +1626,51 @@ class GarminAnalyzerApp:
         table.classes('bg-zinc-900 text-gray-200')
         return table
 
-    def create_decoupling_card(self, decoupling_data):
+    def create_decoupling_card(self, decoupling_data, efficiency_factor=None):
         """
         Create card displaying aerobic decoupling metrics.
 
         Args:
             decoupling_data: Dictionary with decoupling metrics
+            efficiency_factor: Optional EF value from the activity
 
         Returns:
             NiceGUI card component
         """
-        with ui.card().classes('bg-zinc-900 p-4 border border-zinc-800') as card:
+        with ui.card().classes('bg-zinc-900 p-4 border border-zinc-800 h-full') as card:
             card.style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);')
 
-            # Title
-            with ui.row().classes('items-baseline gap-2'):
-                ui.label('AEROBIC DECOUPLING').classes('text-lg font-bold text-white')
+            # Title with info icon
+            with ui.row().classes('items-center gap-2 mb-3'):
+                ui.label('AEROBIC EFFICIENCY').classes('text-lg font-bold text-white')
+                ae_info_icon = ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-base transition-colors')
+                ae_info_icon.on('click', lambda: self.show_aerobic_efficiency_info())
 
-            # Main metric with color
-            with ui.row().classes('items-center gap-2'):
-                ui.label(f"{decoupling_data['decoupling_pct']:.1f}%").classes('text-3xl font-bold').style(
-                    f"color: {decoupling_data['color']};"
-                )
-                ui.label(decoupling_data['status']).classes('text-lg').style(
-                    f"color: {decoupling_data['color']};"
-                )
+            # Data Section: Efficiency Factor (Top Priority)
+            if efficiency_factor and efficiency_factor > 0:
+                with ui.column().classes('gap-0'):
+                    ui.label('EFFICIENCY FACTOR').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
+                    with ui.row().classes('items-baseline gap-2'):
+                        ui.label(f'{efficiency_factor:.2f}').classes('text-3xl font-bold text-white')
+                        ui.label('speed/HR').classes('text-xs text-zinc-500 font-bold')
+            
+            ui.separator().classes('bg-zinc-800 my-3')
 
-            # Efficiency details
-            with ui.column().classes('mt-3 gap-1'):
-                ui.label(f"1st Half Efficiency: {decoupling_data['ef_first_half']:.4f}").classes('text-sm text-gray-400')
-                ui.label(f"2nd Half Efficiency: {decoupling_data['ef_second_half']:.4f}").classes('text-sm text-gray-400')
+            # Data Section: Decoupling
+            with ui.column().classes('gap-0'):
+                ui.label('AEROBIC DECOUPLING').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
+                with ui.row().classes('items-baseline gap-2'):
+                    ui.label(f"{decoupling_data['decoupling_pct']:.1f}%").classes('text-2xl font-bold').style(
+                        f"color: {decoupling_data['color']};"
+                    )
+                    ui.label(decoupling_data['status']).classes('text-base font-bold').style(
+                        f"color: {decoupling_data['color']};"
+                    )
+
+            # Detail Metrics (Small)
+            with ui.column().classes('mt-auto gap-0.5 pt-2'):
+                ui.label(f"1st Half: {decoupling_data['ef_first_half']:.4f}").classes('text-[10px] text-zinc-600')
+                ui.label(f"2nd Half: {decoupling_data['ef_second_half']:.4f}").classes('text-[10px] text-zinc-600')
 
         return card
     
@@ -1184,23 +1695,26 @@ class GarminAnalyzerApp:
             aerobic_te = session_data.get('total_training_effect')
             anaerobic_te = session_data.get('total_anaerobic_training_effect')
             
-            with ui.column().classes('gap-3'):
-                if aerobic_te is not None or anaerobic_te is not None:
-                    with ui.column().classes('gap-1'):
-                        ui.label('TRAINING EFFECT').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
-                        te_str = f"{aerobic_te:.1f} Aerobic" if aerobic_te else "-- Aerobic"
-                        if anaerobic_te:
-                            te_str += f" / {anaerobic_te:.1f} Anaerobic"
-                        ui.label(te_str).classes('text-sm text-white font-mono')
+            with ui.column().classes('gap-3 h-full justify-between w-full'):
                 
-                # Respiration Rate
-                resp_rate = session_data.get('avg_respiration_rate')
-                if resp_rate:
-                    with ui.column().classes('gap-1'):
-                        ui.label('AVG BREATH').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
-                        ui.label(f"{int(resp_rate)} brpm").classes('text-sm text-white font-mono')
+                # --- TOP SECTION (Anchored Top) ---
+                with ui.column().classes('gap-3 w-full'):
+                    if aerobic_te is not None or anaerobic_te is not None:
+                        with ui.column().classes('gap-1'):
+                            ui.label('TRAINING EFFECT').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
+                            te_str = f"{aerobic_te:.1f} Aerobic" if aerobic_te else "-- Aerobic"
+                            if anaerobic_te:
+                                te_str += f" / {anaerobic_te:.1f} Anaerobic"
+                            ui.label(te_str).classes('text-sm text-white font-mono')
+                    
+                    # Respiration Rate
+                    resp_rate = session_data.get('avg_respiration_rate')
+                    if resp_rate:
+                        with ui.column().classes('gap-1'):
+                            ui.label('AVG BREATH').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
+                            ui.label(f"{int(resp_rate)} brpm").classes('text-sm text-white font-mono')
                 
-                # HR Recovery (with info icon)
+                # --- BOTTOM SECTION (Anchored Bottom) ---
                 hrr_list = activity.get('hrr_list')
                 if hrr_list:
                     try:
@@ -1217,13 +1731,16 @@ class GarminAnalyzerApp:
                         else:
                             hrr_color = '#ff4d4d'  # Red
                         
-                        with ui.column().classes('gap-1'):
-                            with ui.row().classes('items-center gap-1'):
+                        with ui.column().classes('gap-0 w-full'):
+                            ui.separator().classes('bg-zinc-800 mb-3')
+                            
+                            with ui.row().classes('items-center gap-2 mb-1'):
                                 ui.label('HR RECOVERY (1-MIN)').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
                                 ui.icon('help_outline').classes('text-zinc-600 hover:text-white text-xs cursor-pointer').on('click', lambda: self.show_hrr_info())
-                            with ui.row().classes('items-center gap-2'):
-                                ui.icon('favorite').classes('text-sm').style('color: #ff4d4d;')
-                                ui.label(f"{score} bpm").classes('text-sm font-bold font-mono').style(f'color: {hrr_color};')
+                            
+                            with ui.row().classes('items-baseline gap-2'):
+                                ui.label(f"{score}").classes('text-3xl font-bold font-mono leading-none').style(f'color: {hrr_color};')
+                                ui.label('bpm').classes('text-xs text-zinc-500 font-bold')
         
         return card
     
@@ -1251,30 +1768,66 @@ class GarminAnalyzerApp:
         # --- 2. GET DIAGNOSIS (Centralized Logic) ---
         diagnosis = analyze_form(cadence, gct, stride, v_osc)
         
-        # --- 3. TRAFFIC LIGHT COLORING (The Evidence) ---
-        def get_metric_color(val, metric_type):
-            if not val:
-                return 'text-zinc-500'
-            val = float(val)
-            
-            if metric_type == 'cadence':
-                return 'text-emerald-400' if val > 170 else 'text-blue-400' if val > 160 else 'text-orange-400'
-            elif metric_type == 'bounce':
-                return 'text-emerald-400' if val < 8.2 else 'text-blue-400' if val < 10.0 else 'text-orange-400'
-            elif metric_type == 'gct':
-                return 'text-emerald-400' if val < 250 else 'text-blue-400' if val < 270 else 'text-orange-400'
-            return 'text-zinc-300'
-        
+        # Calculate Vertical Ratio (if possible)
+        ver_ratio = (v_osc_cm / stride_m) * 100 if v_osc_cm and stride_m else None
+
+        # --- 3. METRIC DEFINITIONS AND COLORING ---
+        # This list defines each metric, its display, and traffic light logic
+        metrics = [
+            {
+                'key': 'CADENCE',
+                'value': f'{int(cadence)}' if cadence else '-',
+                'unit': 'spm',
+                'range': '> 170spm',
+                'verdict': 'High' if cadence and cadence > 170 else 'Low',
+                'color': 'text-emerald-400' if cadence and cadence > 170 else ('text-blue-400' if cadence and cadence > 160 else 'text-orange-400'),
+                'icon': 'directions_run',
+                'meaning': 'Steps per minute (SPM). Higher cadence generally means shorter ground contact, less braking force, and more efficient energy transfer. Most elite runners are 170–185 SPM.'
+            },
+            {
+                'key': 'BOUNCE',
+                'value': f'{bounce:.1f}' if bounce else '-',
+                'unit': 'cm',
+                'range': '< 8cm',
+                'verdict': 'Good' if bounce and bounce < 8 else 'High',
+                'color': 'text-emerald-400' if bounce and bounce < 8 else ('text-yellow-400' if bounce and bounce < 10 else 'text-red-400'),
+                'icon': 'height',
+                'meaning': 'Vertical Oscillation. Lower is better. Measures how much "bounce" for each step forward. Excess bounce wastes energy.'
+            },
+            {
+                'key': 'CONTACT',
+                'value': f'{gct:.0f}' if gct else '-',
+                'unit': 'ms',
+                'range': '< 250ms',
+                'verdict': 'Short' if gct and gct < 250 else 'Long',
+                'color': 'text-emerald-400' if gct and gct < 250 else ('text-blue-400' if gct and gct < 270 else 'text-orange-400'),
+                'icon': 'timer',
+                'meaning': 'Ground Contact Time. How long your foot stays on the ground. Shorter = better toggle and less braking.'
+            },
+            {
+                'key': 'STRIDE',
+                'value': f'{stride_m:.2f}' if stride_m else '-',
+                'unit': 'm',
+                'range': '> 1.0m',
+                'verdict': 'Long' if stride_m and stride_m > 1.0 else 'Short',
+                'color': 'text-blue-400',
+                'icon': 'straighten',
+                'meaning': 'Stride Length. Distance covered in one step. Should increase naturally with speed, not by overreaching.'
+            }
+        ]
+
         # --- 4. RENDER THE CARD ---
         with ui.card().classes('bg-zinc-900 p-4 border border-zinc-800 h-full') as card:
             card.style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);')
             
             # Header
-            with ui.row().classes('items-center gap-2 mb-2'):
-                ui.icon('directions_run').classes('text-zinc-500 text-sm')
-                ui.label('RUNNING MECHANICS').classes('text-xs font-bold text-zinc-500 tracking-wider')
+            with ui.row().classes('items-center gap-2 mb-3'):
+                ui.label('RUNNING MECHANICS').classes('text-lg font-bold text-white')
+                rm_info_icon = ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-base transition-colors')
+                rm_info_icon.on('click', lambda: self.show_form_info())
             
-            # Hero Section (Verdict + Prescription)
+            # Form Verdict Badge
+            cadence_val = cadence if cadence else 0
             with ui.column().classes('w-full items-center py-2 gap-1'):
                 with ui.row().classes('items-center gap-2'):
                     ui.icon(diagnosis['icon']).classes(f"text-2xl {diagnosis['color']}")
@@ -1283,31 +1836,13 @@ class GarminAnalyzerApp:
             
             ui.separator().classes('bg-zinc-800 my-3')
             
-            # Data Grid (4 Columns with Traffic Lights)
+            # Data Grid (Dynamic based on 'metrics' list)
             with ui.row().classes('w-full justify-between text-center'):
-                # Cadence
-                with ui.column().classes('gap-0'):
-                    ui.label('CADENCE').classes('text-[9px] font-bold text-zinc-600')
-                    ui.label(f"{int(cadence) if cadence else '--'}").classes(f"text-sm font-bold font-mono {get_metric_color(cadence, 'cadence')}")
-                    ui.label('spm').classes('text-[9px] text-zinc-600')
-                
-                # Bounce
-                with ui.column().classes('gap-0'):
-                    ui.label('BOUNCE').classes('text-[9px] font-bold text-zinc-600')
-                    ui.label(f"{bounce:.1f}" if bounce else '--').classes(f"text-sm font-bold font-mono {get_metric_color(bounce, 'bounce')}")
-                    ui.label('cm').classes('text-[9px] text-zinc-600')
-                
-                # Contact
-                with ui.column().classes('gap-0'):
-                    ui.label('CONTACT').classes('text-[9px] font-bold text-zinc-600')
-                    ui.label(f"{int(gct) if gct else '--'}").classes(f"text-sm font-bold font-mono {get_metric_color(gct, 'gct')}")
-                    ui.label('ms').classes('text-[9px] text-zinc-600')
-                
-                # Stride
-                with ui.column().classes('gap-0'):
-                    ui.label('STRIDE').classes('text-[9px] font-bold text-zinc-600')
-                    ui.label(f"{stride_m:.2f}" if stride_m else '--').classes('text-sm font-bold font-mono text-zinc-400')
-                    ui.label('m').classes('text-[9px] text-zinc-600')
+                for metric in metrics:
+                    with ui.column().classes('gap-0'):
+                        ui.label(metric['key']).classes('text-[9px] font-bold text-zinc-600')
+                        ui.label(metric['value']).classes(f"text-sm font-bold font-mono {metric['color']}")
+                        ui.label(metric['unit']).classes('text-[9px] text-zinc-600')
         
         return card
     
@@ -1449,6 +1984,9 @@ class GarminAnalyzerApp:
                                 # Pace
                                 with ui.column().classes('gap-0'):
                                     ui.label('PACE').classes('text-[10px] text-zinc-500 uppercase tracking-wider font-semibold')
+                # Pace
+                                with ui.column().classes('gap-0'):
+                                    ui.label('PACE').classes('text-[10px] text-zinc-500 uppercase tracking-wider font-semibold')
                                     ui.label(f"{downhill['avg_pace']}").classes('text-sm text-white font-bold font-mono')
     
     async def open_activity_detail_modal(self, activity_hash, from_feed=False):
@@ -1530,15 +2068,15 @@ class GarminAnalyzerApp:
             
             # 4. Map Verdict to Badge
             if verdict_text == 'HIGH QUALITY':
-                v_label = 'HIGH QUALITY MILES' 
+                v_label = 'High Quality Miles' 
                 v_color = 'text-emerald-400'
                 v_bg = 'bg-emerald-500/20 border-emerald-500/30'
             elif verdict_text == 'STRUCTURAL':
-                 v_label = 'STRUCTURAL MILES'
+                 v_label = 'Structural Miles'
                  v_color = 'text-blue-400'
                  v_bg = 'bg-blue-500/20 border-blue-500/30'
             elif verdict_text == 'BROKEN':
-                v_label = 'BROKEN MILES'
+                v_label = 'Broken Miles'
                 v_color = 'text-red-400'
                 v_bg = 'bg-red-500/20 border-red-500/30'
             else:
@@ -1550,7 +2088,12 @@ class GarminAnalyzerApp:
         # -------------------------------
 
         # Create main modal
+        modal_map = None
+        modal_fit_bounds = None
+        modal_map_card = None
+
         with ui.dialog() as detail_dialog:
+            detail_dialog.props('transition-show=none transition-hide=none')
             with ui.card().classes('w-full max-w-[900px] p-0 bg-zinc-950 h-full border border-zinc-800'):
                 # Close button
                 with ui.row().classes('w-full justify-end p-2'):
@@ -1559,6 +2102,277 @@ class GarminAnalyzerApp:
 
                 # Content container
                 with ui.column().classes('w-full gap-4 px-4 pb-4'):
+
+                    # --- NEW: Cinematic Route Map (Leaflet) ---
+                    # Uses pre-calculated data from "First Principles" Analyzer (TinyDB)
+                    activity_meta = detail_data.get('activity_metadata', {})
+                    map_payload = self._get_or_backfill_map_payload(activity_meta) or {}
+
+                    route_segments = map_payload.get('segments', []) if isinstance(map_payload, dict) else []
+                    final_bounds = self._normalize_bounds(map_payload.get('bounds')) if isinstance(map_payload, dict) else None
+
+                    map_center = None
+                    if isinstance(map_payload, dict):
+                        center_val = map_payload.get('center')
+                        if isinstance(center_val, (list, tuple)) and len(center_val) == 2:
+                            try:
+                                c_lat = float(center_val[0])
+                                c_lon = float(center_val[1])
+                                if -90 <= c_lat <= 90 and -180 <= c_lon <= 180:
+                                    map_center = (c_lat, c_lon)
+                            except Exception:
+                                map_center = None
+
+                    if map_center is None and final_bounds:
+                        map_center = (
+                            (final_bounds[0][0] + final_bounds[1][0]) / 2,
+                            (final_bounds[0][1] + final_bounds[1][1]) / 2,
+                        )
+
+                    if route_segments and map_center:
+                        # Map Container
+                        with ui.card().classes('w-full h-80 bg-zinc-950 p-0 border-none no-shadow overflow-hidden relative group').style('opacity: 0; transition: opacity 0.18s ease;') as map_card:
+                            modal_map_card = map_card
+                            # Initialize Leaflet with NO controls for cinematic look
+                            m = ui.leaflet(center=map_center, zoom=13, options={
+                                'zoomControl': False, 
+                                'attributionControl': False
+                            }).classes('w-full h-full leaflet-seam-fix')
+                            
+                            # Hybrid Tiles (helps hide seam artifacts on some satellite tile rows)
+                            m.tile_layer(
+                                url_template=r'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+                                options={'maxZoom': 20, 'detectRetina': True}
+                            )
+
+                            # Route color mode state + shared render pipeline
+                            map_color_mode = {'value': 'pace'}
+                            map_route_palette = {
+                                'pace': 'linear-gradient(to right, #0000ff, #00ff00, #ffff00, #ffa500, #ff0000)',
+                                'hr': 'linear-gradient(to right, #3b82f6, #10b981, #f97316, #ef4444)',
+                            }
+                            map_legend_left = {'pace': 'Slower', 'hr': 'Lower HR'}
+                            map_legend_right = {'pace': 'Faster', 'hr': 'Higher HR'}
+                            route_weight = 4
+
+                            def _segment_color(seg, mode):
+                                try:
+                                    if mode == 'hr' and len(seg) > 5 and isinstance(seg[5], str) and seg[5].startswith('#'):
+                                        return seg[5]
+                                    if len(seg) > 4 and isinstance(seg[4], str) and seg[4].startswith('#'):
+                                        return seg[4]
+                                except Exception:
+                                    pass
+                                return '#10b981'
+
+                            def _render_route(mode='pace'):
+                                if not route_segments:
+                                    return
+                                try:
+                                    m.clear_layers()
+                                except Exception as ex:
+                                    print(f"Map clear layers warning: {ex}")
+
+                                # Re-add base tile layer after clear
+                                m.tile_layer(
+                                    url_template=r'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+                                    options={'maxZoom': 20, 'detectRetina': True}
+                                )
+
+                                # Group segments by selected color mode to reduce layer count
+                                segments_by_color = {}
+                                for seg in route_segments:
+                                    if not isinstance(seg, (list, tuple)) or len(seg) < 4:
+                                        continue
+                                    color = _segment_color(seg, mode)
+                                    if color not in segments_by_color:
+                                        segments_by_color[color] = []
+                                    segments_by_color[color].append([[seg[0], seg[1]], [seg[2], seg[3]]])
+
+                                for color, latlngs in segments_by_color.items():
+                                    m.generic_layer(
+                                        name='polyline',
+                                        args=[
+                                            latlngs,
+                                            {
+                                                'color': color,
+                                                'weight': route_weight,
+                                                'opacity': 1.0,
+                                                'lineCap': 'round',
+                                                'lineJoin': 'round'
+                                            }
+                                        ]
+                                    )
+
+                            # Initial draw (default pace)
+                            _render_route('pace')
+
+                            # Start / End markers (derived from first and last route segments)
+                            start_point = None
+                            end_point = None
+                            try:
+                                if route_segments and len(route_segments[0]) >= 4:
+                                    start_point = [float(route_segments[0][0]), float(route_segments[0][1])]
+                                if route_segments and len(route_segments[-1]) >= 4:
+                                    end_point = [float(route_segments[-1][2]), float(route_segments[-1][3])]
+                            except Exception:
+                                start_point = None
+                                end_point = None
+
+                            def _valid_latlng(pt):
+                                return (
+                                    isinstance(pt, (list, tuple))
+                                    and len(pt) == 2
+                                    and -90 <= pt[0] <= 90
+                                    and -180 <= pt[1] <= 180
+                                )
+
+                            # Pro start/end markers using Leaflet divIcon with crisp inline SVG
+                            if _valid_latlng(start_point) or _valid_latlng(end_point):
+                                icon_start_svg = """
+<svg width="16" height="16" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
+    <path d="M8 5V19L19 12L8 5Z" />
+</svg>
+""".strip()
+                                icon_end_svg = """
+<svg width="14" height="14" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+</svg>
+""".strip()
+
+                                async def _add_pro_markers_once_ready(_map=m, _start=start_point, _end=end_point, _svg_start=icon_start_svg, _svg_end=icon_end_svg):
+                                    try:
+                                        await _map.initialized()
+                                        await asyncio.sleep(0.02)
+                                    except Exception as ex:
+                                        print(f"Pro marker init wait failed: {ex}")
+                                        return
+
+                                    if _valid_latlng(_start):
+                                        try:
+                                            start_js = (
+                                                "L.marker(["
+                                                f"{_start[0]}, {_start[1]}"
+                                                "], {"
+                                                "interactive:false, keyboard:false, zIndexOffset:1000, "
+                                                "icon:L.divIcon({"
+                                                "className:'pro-marker pm-start',"
+                                                f"html:{json.dumps(_svg_start)},"
+                                                "iconSize:[30,30],"
+                                                "iconAnchor:[15,15]"
+                                                "})"
+                                                "})"
+                                            )
+                                            _map.run_map_method(':addLayer', start_js)
+                                        except Exception as ex:
+                                            print(f"Pro start marker add failed: {ex}")
+
+                                    if _valid_latlng(_end):
+                                        try:
+                                            end_js = (
+                                                "L.marker(["
+                                                f"{_end[0]}, {_end[1]}"
+                                                "], {"
+                                                "interactive:false, keyboard:false, zIndexOffset:1000, "
+                                                "icon:L.divIcon({"
+                                                "className:'pro-marker pm-end',"
+                                                f"html:{json.dumps(_svg_end)},"
+                                                "iconSize:[30,30],"
+                                                "iconAnchor:[15,15]"
+                                                "})"
+                                                "})"
+                                            )
+                                            _map.run_map_method(':addLayer', end_js)
+                                        except Exception as ex:
+                                            print(f"Pro end marker add failed: {ex}")
+
+                                asyncio.create_task(_add_pro_markers_once_ready())
+
+                            # Explicit Attribution (Minimalist Text)
+                            with ui.element('div').classes('absolute bottom-1 right-2 z-[9999] pointer-events-none text-[10px] text-zinc-400 font-mono mix-blend-plus-lighter'):
+                                ui.html('&copy; Google 2026')
+
+                            # Custom monochrome map mode slider (PACE <-> HR)
+                            toggle_id = f'map_mode_toggle_{activity_hash}'
+
+                            async def _on_map_mode_checkbox_change(e):
+                                checked = False
+                                try:
+                                    checked = bool(await ui.run_javascript(
+                                        f'Boolean(document.getElementById({json.dumps(toggle_id)})?.checked)'
+                                    ))
+                                except Exception:
+                                    raw = e.args
+                                    if isinstance(raw, dict):
+                                        if isinstance(raw.get('checked'), bool):
+                                            checked = raw.get('checked', False)
+                                        elif isinstance(raw.get('target'), dict):
+                                            checked = bool(raw.get('target', {}).get('checked', False))
+                                        elif 'value' in raw:
+                                            value_str = str(raw.get('value', '')).strip().lower()
+                                            checked = value_str in {'1', 'true', 'on', 'checked', 'hr'}
+                                    elif isinstance(raw, bool):
+                                        checked = raw
+                                _set_map_mode('hr' if checked else 'pace')
+
+                            with ui.element('div').classes('mono-toggle-wrapper'):
+                                ui.element('input').props(
+                                    f'type="checkbox" id="{toggle_id}" class="mono-toggle-checkbox"'
+                                ).on('change', _on_map_mode_checkbox_change)
+
+                                with ui.element('label').props(f'for="{toggle_id}" class="mono-toggle-label"'):
+                                    ui.label('PACE').classes('mono-toggle-text-pace')
+                                    ui.label('HR').classes('mono-toggle-text-hr')
+
+                            # Custom Zoom Controls (Top Left - Dark Glass)
+                            with ui.column().classes('absolute top-2 left-2 z-[9999] gap-2'):
+                                # Zoom In
+                                with ui.button(icon='add').props('round dense flat no-caps ripple=false').classes('map-zoom-btn no-ripple').style('background-color: rgba(9, 9, 11, 0.72) !important; color: #ffffff !important; border: 1px solid rgba(255, 255, 255, 0.14) !important;').on('click', lambda: m.run_map_method("zoomIn")):
+                                    pass
+                                # Zoom Out
+                                with ui.button(icon='remove').props('round dense flat no-caps ripple=false').classes('map-zoom-btn no-ripple').style('background-color: rgba(9, 9, 11, 0.72) !important; color: #ffffff !important; border: 1px solid rgba(255, 255, 255, 0.14) !important;').on('click', lambda: m.run_map_method("zoomOut")):
+                                    pass
+
+                            # Speed Legend (Glassmorphism - Top Right)
+                            with ui.column().classes('absolute top-2 right-2 z-[9999] p-3 rounded-xl bg-black/60 backdrop-blur-md border border-white/10 shadow-lg gap-1'):
+                                # Gradient Bar
+                                legend_bar = ui.element('div').classes('w-32 h-2 rounded-full').style(f"background: {map_route_palette['pace']}")
+                                # Labels
+                                with ui.row().classes('w-full justify-between text-[10px] text-zinc-300 font-medium tracking-wide'):
+                                    legend_left = ui.label(map_legend_left['pace'])
+                                    legend_right = ui.label(map_legend_right['pace'])
+
+                            def _set_map_mode(mode):
+                                if mode not in ('pace', 'hr'):
+                                    mode = 'pace'
+                                if map_color_mode['value'] == mode:
+                                    return
+                                map_color_mode['value'] = mode
+
+                                # Route redraw
+                                _render_route(mode)
+
+                                # Re-add start/end markers (route redraw clears all map layers)
+                                if _valid_latlng(start_point) or _valid_latlng(end_point):
+                                    try:
+                                        asyncio.create_task(_add_pro_markers_once_ready())
+                                    except Exception:
+                                        pass
+
+                                # Legend update
+                                legend_bar.style(f"background: {map_route_palette.get(mode, map_route_palette['pace'])}")
+                                legend_left.set_text(map_legend_left.get(mode, map_legend_left['pace']))
+                                legend_right.set_text(map_legend_right.get(mode, map_legend_right['pace']))
+
+                            if final_bounds:
+                                # defer fit until modal is visible; execute after dialog open lifecycle
+                                modal_map = m
+                                modal_fit_bounds = final_bounds
+
+                    
+                    # -------------------------------------------
+                            
+                    # -------------------------------------------
 
                     # --- HEADER (Polished Layout) ---
                     with ui.column().classes('w-full px-4 gap-1'):
@@ -1585,7 +2399,7 @@ class GarminAnalyzerApp:
                             if calories:
                                 metrics_str += f" • {calories} cal"
                             
-                            ui.label(metrics_str).classes('text-zinc-400 font-mono text-sm tracking-wide')
+                            ui.label(metrics_str).classes('text-zinc-400 font-sans tabular-nums text-sm tracking-wide')
 
                             # The Badge (Injecting Context)
                             if v_label:
@@ -1601,6 +2415,10 @@ class GarminAnalyzerApp:
                     with ui.card().classes('w-full bg-zinc-900 p-4 border border-zinc-800').style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
                         if detail_data.get('max_hr_fallback'):
                             ui.label('⚠️ Zones based on Session Max HR').classes('text-xs text-yellow-500 mb-2')
+                        
+                        # Title
+                        ui.label('TIME IN HEART RATE ZONES').classes('text-lg font-bold text-white mb-2')
+                        
                         hr_chart = self.create_hr_zone_chart(hr_zones)
                         ui.plotly(hr_chart).classes('w-full')
 
@@ -1611,12 +2429,12 @@ class GarminAnalyzerApp:
                     
                     has_dynamics = session_data and any([session_data.get('avg_vertical_oscillation'), session_data.get('avg_stance_time')])
                     
-                    with ui.row().classes('w-full gap-3'):
+                    with ui.row().classes('w-full gap-3 items-stretch'):
                         if has_dynamics:
                             with ui.column().classes('flex-1 min-w-0'):
                                 self.create_running_dynamics_card(session_data)
                         with ui.column().classes('flex-1 min-w-0'):
-                            self.create_decoupling_card(decoupling)
+                            self.create_decoupling_card(decoupling, efficiency_factor=activity.get('efficiency_factor', 0))
                         if session_data:
                             with ui.column().classes('flex-1 min-w-0'):
                                 self.create_physiology_card(session_data, activity)
@@ -1624,8 +2442,19 @@ class GarminAnalyzerApp:
                     # 4. Cadence-Elevation Chart
                     if detail_data.get('cadence_stream') and detail_data.get('distance_stream'):
                         with ui.card().classes('w-full bg-zinc-900 p-4 border border-zinc-800').style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
-                            cadence_chart = self.create_cadence_elevation_chart(
-                                detail_data['distance_stream'], detail_data['cadence_stream'], detail_data['elevation_stream'], use_miles=True
+                            # Title
+                            ui.label('CADENCE & FORM ANALYSIS').classes('text-lg font-bold text-white mb-2')
+                            
+                            cadence_chart = self.create_form_analysis_chart(
+                                detail_data['distance_stream'], 
+                                detail_data['cadence_stream'], 
+                                detail_data['elevation_stream'], 
+                                timestamps=detail_data.get('timestamps'), 
+                                vertical_oscillation=detail_data.get('vertical_oscillation'),
+                                stance_time=detail_data.get('stance_time'),
+                                vertical_ratio=detail_data.get('vertical_ratio'),
+                                step_length=detail_data.get('step_length'),
+                                use_miles=True
                             )
                             ui.plotly(cadence_chart).classes('w-full')
 
@@ -1639,6 +2468,27 @@ class GarminAnalyzerApp:
 
         detail_dialog.open()
 
+        if modal_map and modal_fit_bounds:
+            fit_options = {'padding': [26, 26], 'maxZoom': 18, 'animate': False}
+
+            def _stabilize_and_fit():
+                try:
+                    modal_map.run_map_method('invalidateSize')
+                    modal_map.run_map_method('fitBounds', modal_fit_bounds, fit_options)
+                except Exception as ex:
+                    print(f"Map fitBounds retry failed: {ex}")
+
+            def _finalize_map_open():
+                _stabilize_and_fit()
+                if modal_map_card:
+                    modal_map_card.style('opacity: 1; transition: opacity 0.18s ease;')
+
+            # Two-pass strategy for smooth first paint:
+            # 1) fit while map is still transparent
+            # 2) refit after dialog settles, then fade in
+            ui.timer(0.02, _stabilize_and_fit, once=True)
+            ui.timer(0.08, _finalize_map_open, once=True)
+
  
     def build_ui(self):
         """Construct the complete UI layout with fixed sidebar."""
@@ -1649,6 +2499,11 @@ class GarminAnalyzerApp:
         /**************************************************/
         /* 1. THE APPLE-STYLE HOVER FIX (DARK MODE)       */
         /**************************************************/
+
+        /* Hide Plotly Modebar */
+        .modebar {
+            display: none !important;
+        }
         
         /* Disable Quasar's default 'ripple' overlay */
         .q-btn.no-ripple .q-focus-helper {
@@ -1684,7 +2539,13 @@ class GarminAnalyzerApp:
         body, .q-page, .nicegui-content { margin: 0 !important; padding: 0 !important; }
         
         html, body, #app, .q-page-container, .q-page {
-            background-color: #F5F5F7 !important;
+            background-color: #09090b !important;
+            color: #e4e4e7 !important;
+        }
+        
+        body {
+            background-image: radial-gradient(circle at 50% 0%, #27272a 0%, transparent 60%) !important;
+            background-attachment: fixed !important;
         }
         
         html, body { overscroll-behavior: none !important; overflow: hidden !important; }
@@ -1704,6 +2565,40 @@ class GarminAnalyzerApp:
         @keyframes slideOut {
             from { transform: translateX(0); opacity: 1; }
             to { transform: translateX(400px); opacity: 0; }
+        }
+
+        /**************************************************/
+        /* 3.5 "DARK GLASS" ACTIVITY CARD                 */
+        /**************************************************/
+        .glass-card {
+            /* Base Dynamic Properties driven by python-injected variables */
+            background: radial-gradient(circle at top right, var(--strain-bg), transparent 70%), #1b1b1b !important;
+            border: 1px solid var(--strain-border) !important;
+            box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.05), 0 4px 20px var(--strain-shadow) !important;
+            border-radius: 12px !important;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease !important;
+        }
+        .glass-card:hover {
+            transform: translateY(-2px) !important;
+            /* Intensify glow to 20% and brighter top edge */
+            box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.1), 0 8px 30px var(--strain-shadow-hover) !important;
+            border-color: var(--strain-border-hover) !important;
+        }
+
+        /* 3.6 INTERACTIVE "LIFT & GLOW" EFFECT */
+        .interactive-card {
+            transition: all 0.3s ease-out !important;
+            /* Base state matches glass-card but explicit transition ensures smoothness */
+        }
+        
+        .interactive-card:hover {
+            /* Lift Effect */
+            transform: translateY(-4px) !important;
+            /* Expanded Glow Shadow using injected RGB variable */
+            /* We use !important to override the base glass-card hover shadow if needed, or blend them */
+            box-shadow: 0 12px 40px rgba(var(--theme-color-rgb), 0.3) !important;
+            /* Brightened Border */
+            border-color: rgba(255, 255, 255, 0.3) !important;
         }
 
         /**************************************************/
@@ -1744,6 +2639,177 @@ class GarminAnalyzerApp:
         }
 
         /**************************************************/
+        /* 5.5 MAP ZOOM BUTTONS (ACTIVITY MODAL)         */
+        /**************************************************/
+        .map-zoom-btn.q-btn {
+            min-width: 2.25rem !important;
+            min-height: 2.25rem !important;
+            width: 2.25rem !important;
+            height: 2.25rem !important;
+            padding: 0 !important;
+            border-radius: 9999px !important;
+            background: rgba(0, 0, 0, 0.60) !important;
+            border: 1px solid rgba(255, 255, 255, 0.10) !important;
+            color: #ffffff !important;
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35) !important;
+            backdrop-filter: blur(12px) saturate(120%);
+            -webkit-backdrop-filter: blur(12px) saturate(120%);
+            transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+        }
+        .map-zoom-btn.q-btn.bg-primary,
+        .map-zoom-btn.q-btn.text-primary {
+            background: rgba(9, 9, 11, 0.72) !important;
+            color: #ffffff !important;
+        }
+        .map-zoom-btn.q-btn .q-focus-helper {
+            display: none !important;
+        }
+        .map-zoom-btn.q-btn .q-btn__content {
+            color: #ffffff !important;
+        }
+        .map-zoom-btn.q-btn .q-icon {
+            color: #ffffff !important;
+            font-size: 18px !important;
+        }
+        .map-zoom-btn.q-btn:hover {
+            transform: translateY(-1px) !important;
+            background: rgba(24, 24, 27, 0.68) !important;
+            border-color: rgba(255, 255, 255, 0.18) !important;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.42) !important;
+        }
+        .map-zoom-btn.q-btn:active {
+            transform: scale(0.97) !important;
+        }
+
+        /**************************************************/
+        /* 5.55 MAP LAYER TOGGLE (CUSTOM MONO SLIDER)      */
+        /**************************************************/
+        .mono-toggle-wrapper {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 9999;
+            pointer-events: auto;
+        }
+        .mono-toggle-checkbox {
+            display: none !important;
+        }
+        .mono-toggle-label {
+            width: 140px;
+            height: 34px;
+            display: block;
+            position: relative;
+            cursor: pointer;
+            border-radius: 9999px;
+            overflow: hidden;
+            background: rgba(0, 0, 0, 0.58);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.34);
+        }
+        .mono-toggle-label::before {
+            content: 'PACE';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 68px;
+            height: 28px;
+            border-radius: 9999px;
+            background: #ffffff;
+            color: #059669;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 8px rgba(16, 185, 129, 0.30);
+            z-index: 2;
+            transition: transform 420ms cubic-bezier(0.47, -0.3, 0.21, 1.33);
+        }
+        .mono-toggle-checkbox:checked + .mono-toggle-label::before {
+            transform: translateX(68px);
+            content: 'HR';
+            background: #ffffff;
+            color: #dc2626;
+            box-shadow: 0 2px 8px rgba(239, 68, 68, 0.30);
+        }
+        .mono-toggle-text-pace,
+        .mono-toggle-text-hr {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            color: rgba(255, 255, 255, 0.60);
+            pointer-events: none;
+            z-index: 1;
+            transition: color 0.25s ease;
+            text-transform: uppercase;
+        }
+        .mono-toggle-text-pace { left: 18px; }
+        .mono-toggle-text-hr { right: 24px; }
+
+        .mono-toggle-checkbox:not(:checked) + .mono-toggle-label .mono-toggle-text-pace {
+            color: rgba(255, 255, 255, 0.00);
+        }
+        .mono-toggle-checkbox:not(:checked) + .mono-toggle-label .mono-toggle-text-hr {
+            color: rgba(255, 255, 255, 0.66);
+        }
+        .mono-toggle-checkbox:checked + .mono-toggle-label .mono-toggle-text-pace {
+            color: rgba(255, 255, 255, 0.66);
+        }
+        .mono-toggle-checkbox:checked + .mono-toggle-label .mono-toggle-text-hr {
+            color: rgba(255, 255, 255, 0.00);
+        }
+
+        /**************************************************/
+        /* 5.7 PRO START/END MARKERS (LEAFLET DIVICON)    */
+        /**************************************************/
+        .pro-marker {
+            display: flex !important;
+            align-items: center;
+            justify-content: center;
+            border-radius: 9999px;
+            border: 2px solid #ffffff;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+            transition: transform 0.2s ease;
+            background-clip: padding-box;
+        }
+        .pro-marker:hover {
+            transform: scale(1.08);
+            z-index: 1000 !important;
+        }
+        .pm-start { background-color: #10b981; }
+        .pm-end { background-color: #ef4444; }
+        .pro-marker svg {
+            display: block;
+        }
+
+        /**************************************************/
+        /* 5.6 LEAFLET TILE SEAM FIX (PHANTOM LINE)      */
+        /**************************************************/
+        .leaflet-seam-fix,
+        .leaflet-seam-fix .leaflet-container {
+            background: #09090b !important;
+        }
+        .leaflet-seam-fix .leaflet-pane,
+        .leaflet-seam-fix .leaflet-tile-container,
+        .leaflet-seam-fix .leaflet-tile {
+            -webkit-backface-visibility: hidden;
+            backface-visibility: hidden;
+        }
+        .leaflet-seam-fix img,
+        .leaflet-seam-fix .leaflet-tile {
+            border: 0 !important;
+            max-width: none !important;
+            will-change: transform;
+        }
+
+        /**************************************************/
         /* 6. DROPDOWN & SELECT STYLING (PRESERVED)       */
         /**************************************************/
         .q-menu .q-item { color: white !important; background-color: #1F1F1F !important; }
@@ -1756,10 +2822,10 @@ class GarminAnalyzerApp:
         
         # 2. COLOR SCHEME
         ui.colors(primary='#10B981', secondary='#1F1F1F', accent='#ff9900', 
-                  dark='#F5F5F7', positive='#10B981', negative='#ff4d4d', 
+                  dark='#09090b', positive='#10B981', negative='#ff4d4d', 
                   info='#3b82f6', warning='#ff9900')
         
-        ui.query('body').classes('bg-gray-100').style('background-color: #F5F5F7;')
+        ui.query('body').classes('bg-zinc-950')
         
         # 3. MAIN LAYOUT
         with ui.row().classes('w-full h-screen m-0 p-0 gap-0 no-wrap overflow-hidden'):
@@ -1781,22 +2847,27 @@ class GarminAnalyzerApp:
                          'This Year', 'All Time'],
                 value='Last 30 Days',
                 on_change=self.on_filter_change
-            ).classes('w-full mb-4').style('color: white;').props('outlined dense')
+            ).classes('w-full mb-4 bg-zinc-900').style('color: white;').props('outlined dense dark behavior="menu"')
             
             # Action buttons - Modern solid style with Apple aesthetics
-            ui.button('Import Folder', icon='create_new_folder', on_click=self.select_folder, color=None).classes(
-                'w-full mb-2 text-white hover:bg-zinc-700'
-            ).style('background-color: #3a3a3c; border-radius: 10px; border: none;')
+            # Action buttons - Reverted to Dark/Subtle Style for Utilities
+            with ui.row().classes('w-full gap-2 mt-4 mb-2'):
+                # Import Button: Dark Grey, White Text, Subtle Hover
+                ui.button('IMPORT FOLDER', on_click=self.select_folder, icon='folder_open').classes('flex-1 bg-zinc-800 text-white hover:bg-zinc-700').props('flat')
             
-            self.export_btn = ui.button('Export CSV', icon='file_download',
-                                         on_click=self.export_csv, color=None).classes(
-                'w-full mb-2 text-white hover:bg-zinc-700'
-            ).props('disable').style('background-color: #3a3a3c; border-radius: 10px; border: none;')
+            # Export Button: Dark Grey, White Text, Subtle Hover
+            self.export_btn = ui.button('EXPORT CSV', on_click=self.export_csv, icon='download').classes('w-full bg-zinc-800 text-white hover:bg-zinc-700 mb-2').props('flat disable')
             
-            self.copy_btn = ui.button('Copy for LLM', icon='content_copy',
-                                       on_click=self.copy_to_llm, color='primary').classes(
-                'w-full mb-2 text-white'
-            ).props('disable').style('border-radius: 10px; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);')
+            # Visual Separator
+            ui.separator().classes('my-2 bg-zinc-800')
+
+            # "Copy for AI" Button (HERO STYLE: Gradient + Glow + Margin)
+            # Added mt-4 for adjusted isolation (Total ~2rem with separator)
+            self.copy_btn = ui.button('COPY FOR AI', on_click=self.copy_to_llm, icon='content_copy').classes(
+                'w-full text-white font-bold tracking-wide transform transition-transform duration-300 hover:scale-105 mt-4'
+            ).props('disable').style(
+                'background: linear-gradient(to right, #10b981, #14b8a6); box-shadow: 0 0 15px rgba(16, 185, 129, 0.4); border: none;'
+            )
             
             # Create persistent loading dialog for copy operation
             self.copy_loading_dialog = ui.dialog().props('persistent')
@@ -1819,21 +2890,22 @@ class GarminAnalyzerApp:
     
     def build_main_content(self):
         """Create tabbed main content area with scrolling."""
-        # Outer wrapper: No padding, flush to edges with light grey background
-        with ui.column().classes('flex-1 h-screen overflow-hidden p-0 gap-0').style('background-color: #F5F5F7;'):
+        # Outer wrapper: No padding, flush to edges with dark background
+        with ui.column().classes('flex-1 h-screen overflow-hidden p-0 gap-0'):
             # Inner container: Adds padding for content breathing room (no bottom padding)
-            with ui.column().classes('w-full min-h-full pt-6 px-6 pb-0 gap-4').style('background-color: #F5F5F7;'):
+            # Increased pt-6 -> pt-10 for global vertical rhythm
+            with ui.column().classes('w-full min-h-full pt-6 px-6 pb-0 gap-4'):
                 # Create tabs row with absolute positioned Save Chart button
-                with ui.row().classes('w-full items-center mb-0 relative pb-3').style('border-bottom: 1px solid #E5E5E5;'):
+                with ui.row().classes('w-full items-center mb-0 relative pb-3'):
                     # Tabs centered, taking full width
-                    with ui.tabs().classes('w-full text-gray-800 justify-center') as tabs:
-                        trends_tab = ui.tab('Trends').classes('text-gray-800')
-                        report_tab = ui.tab('FEED').classes('text-gray-800')
-                        activities_tab = ui.tab('ACTIVITIES').classes('text-gray-800')
+                    with ui.tabs(on_change=lambda e: self.toggle_save_chart_button(e.value)).classes('w-full justify-center').props('active-color="white" indicator-color="orange" align="center" content-class="text-zinc-500"') as tabs:
+                        trends_tab = ui.tab('Trends')
+                        report_tab = ui.tab('FEED')
+                        activities_tab = ui.tab('ACTIVITIES')
                     
                     # Save Chart button absolutely positioned on the right (minimal, icon-focused)
                     # Add transition for smooth fade effect
-                    self.save_chart_btn = ui.button(icon='download', on_click=self.save_chart_to_downloads, color=None).classes('text-white absolute right-0 top-0 z-10').style('background-color: #3a3a3c; border-radius: 6px; border: none; padding: 8px; min-width: 40px; transition: opacity 0.3s ease-in-out, background-color 0.2s ease;').props('flat dense').tooltip('Save Chart')
+                    self.save_chart_btn = ui.button(icon='download', on_click=self.save_chart_to_downloads, color=None).classes('text-white absolute right-0 top-0 z-10').style('background-color: #27272a; border-radius: 6px; border: none; padding: 8px; min-width: 40px; transition: opacity 0.3s ease-in-out, background-color 0.2s ease;').props('flat dense').tooltip('Save Chart')
                 
                 # Create tab panels with transparent background
                 with ui.tab_panels(tabs, value=trends_tab).classes('w-full flex-1').props('transparent'):
@@ -1849,9 +2921,6 @@ class GarminAnalyzerApp:
                     with ui.tab_panel(activities_tab).classes('p-0 h-full flex flex-col'):
                         self.build_activities_tab()
                 
-                # Show/hide Save Chart button based on active tab
-                tabs.on('update:model-value', lambda e: self.toggle_save_chart_button(e.args))
-
         # Floating Action Bar (Lives at root level to float above everything)
         self.fab_container = ui.row().classes(
             'fixed bottom-8 left-1/2 transform -translate-x-1/2 ' # Centered at bottom
@@ -1863,28 +2932,33 @@ class GarminAnalyzerApp:
     def build_trends_tab(self):
         """Create trends tab with embedded Plotly chart."""
         # Store the plotly_container as an instance variable so it can be updated later
-        self.plotly_container = ui.column().classes('w-full').style('min-height: 900px; background-color: #F5F5F7;')
+        # Added 'p-4' to match Feed container's padding for perfect vertical alignment
+        self.plotly_container = ui.column().classes('w-full p-8').style('min-height: 900px;')
         
         with self.plotly_container:
             # Show placeholder message when no data is available
             ui.label('No data available. Import activities to view trends.').classes(
-                'text-center text-gray-600 mt-20'
+                'text-center text-zinc-400 mt-20'
             )
     
     def build_report_tab(self):
         """Create report tab with Card View."""
-        with ui.tab_panel('report').classes('w-full p-0 bg-transparent'):
-            # The container for our cards with light grey background (no top padding for alignment)
-            self.report_container = ui.column().classes('w-full gap-3 px-4 pb-4').style('background-color: #F5F5F7;')
-
+        # RETRY FIX: Feed Card Hover Cut-off
+        # Reverted pt-10 to standard p-4. Global container padding handles the rhythm now.
+        with ui.scroll_area().classes('w-full h-full'):
+            # Removed 'pt-10', keeping 'p-4' for internal spacing
+            self.feed_container = ui.column().classes('w-full max-w-4xl mx-auto gap-4 p-4 pb-8')
     
     def build_activities_tab(self):
         """Create activities tab with Filter, Table, and Floating Action Bar."""
         # 1. Filter Bar
-        self.filter_container = ui.row().classes('w-full mb-2 gap-2')
-        
-        # 2. Table
-        self.grid_container = ui.column().classes('w-full flex-1 overflow-hidden')
+        # Added 'p-4' to wrapper so it starts at same vertical height as Feed/Trends
+        # Note: We need a wrapping column to hold the padding, or apply it to the row
+        with ui.column().classes('w-full flex-1 overflow-hidden p-8 gap-2'):
+            self.filter_container = ui.row().classes('w-full mb-0 gap-2')
+            
+            # 2. Table (Moved inside this wrapper)
+            self.grid_container = ui.column().classes('w-full flex-1 overflow-hidden')
         
         # 3. Initial Render
         self.update_filter_bar()
@@ -2063,12 +3137,12 @@ class GarminAnalyzerApp:
                     h = row.get('hash')
                     if h:
                         self.db.delete_activity(h)
-                        deleted += 1
+                        deleted += 0
             self.runs_count_label.text = f'{self.db.get_count()}'
             # Clear selection and hide FAB
             if hasattr(self, 'activities_table') and self.activities_table:
                 self.activities_table.selected.clear()
-                self.activities_table.update()
+            self.activities_table.update()
             self.hide_floating_action_bar()
             await self.refresh_data_view()
             ui.notify(f"Deleted {deleted} activit{'ies' if deleted != 1 else 'y'}", type='positive', icon='delete')
@@ -2107,6 +3181,11 @@ class GarminAnalyzerApp:
         else:
             self.export_btn.props(add='disable')
             self.copy_btn.props(add='disable')
+
+        # Background map payload migration for older activities (non-blocking)
+        if self.activities_data:
+            if self._map_backfill_task is None or self._map_backfill_task.done():
+                self._map_backfill_task = asyncio.create_task(self._backfill_map_payloads_for_loaded_activities())
     
     def toggle_save_chart_button(self, tab_name):
         """
@@ -2290,11 +3369,30 @@ root.destroy()
                 self.timeframe_select.props(remove='disable')
                 return
             
-            # Show progress dialog
-            with ui.dialog() as progress_dialog, ui.card().classes('bg-zinc-900 text-white p-6'):
-                ui.label('ANALYZING FIT FILES...').classes('text-lg font-bold mb-4 text-white')
-                progress_bar = ui.linear_progress(value=0).classes('w-96')
-                progress_label = ui.label('Starting...').classes('mt-2 text-white')
+            # Show Premium Progress Dialog
+            progress_dialog = ui.dialog().props('persistent transition-show="scale" transition-hide="scale" backdrop-filter="blur(4px)"')
+            with progress_dialog, ui.card().classes('bg-zinc-900/95 backdrop-blur-xl border border-white/10 p-8 shadow-2xl rounded-2xl items-center text-center w-[400px] gap-6'):
+                
+                # Header Section with Icon
+                with ui.column().classes('items-center gap-2'):
+                     # Pulsing folder icon
+                     ui.icon('folder_open', size='3rem', color='emerald-500').classes('mb-2 opacity-90 animate-pulse')
+                     ui.label('Importing Your Data').classes('text-xl font-bold tracking-tight text-white')
+                     ui.label('Calculating metrics & analyzing GPS tracks...').classes('text-sm text-zinc-400 font-medium')
+
+                # Progress Section
+                with ui.column().classes('w-full gap-2'):
+                    # Linear Progress with custom track color
+                    # Explicitly disable show-value to prevent raw float display (the "weird text")
+                    progress_bar = ui.linear_progress(value=0, show_value=False).classes('rounded-full h-2').props('color="emerald-500" track-color="grey-9" size="8px"')
+                    
+                    # Status Row
+                    with ui.row().classes('w-full justify-between text-xs font-mono text-zinc-500'):
+                         progress_label = ui.label('Initializing...')
+                         percent_label = ui.label('0%')
+
+                # Footer / Tech Detail
+                # (Removed per user request)
             
             progress_dialog.open()
             
@@ -2325,6 +3423,7 @@ root.destroy()
                     # Update progress bar after each file
                     progress = (i + 1) / len(fit_files)
                     progress_bar.value = progress
+                    percent_label.text = f'{int(progress * 100)}%'
                     progress_label.text = f'Processing {i + 1}/{len(fit_files)} - {os.path.basename(filepath)}'
                     
                     # Allow UI to update
@@ -2375,12 +3474,18 @@ root.destroy()
             # Re-enable timeframe dropdown
             self.timeframe_select.props(remove='disable')
     
+    @staticmethod
+    def hex_to_rgb(hex_color):
+        """Convert #RRGGBB to 'R, G, B' string for CSS variables."""
+        hex_color = hex_color.lstrip('#')
+        return f"{int(hex_color[0:2], 16)}, {int(hex_color[2:4], 16)}, {int(hex_color[4:6], 16)}"
+
     def update_report_text(self):
         """Update report with Beautiful Cards. Fully restored styling."""
-        self.report_container.clear()
+        self.feed_container.clear()
         
         if not self.activities_data:
-            with self.report_container:
+            with self.feed_container:
                 ui.label('No runs found for this timeframe.').classes('text-gray-600 italic')
             return
         
@@ -2393,7 +3498,7 @@ root.destroy()
         else:
             long_run_threshold = 10.0
         
-        with self.report_container:
+        with self.feed_container:
             for d in sorted(self.activities_data, key=lambda x: x.get('date', ''), reverse=True):
                 
                 # 1. Determine Border Color based on Cost
@@ -2430,23 +3535,44 @@ root.destroy()
                 strain = int(moving_time_min * factor)
                 
                 if strain < 75:
-                    strain_label, strain_color, strain_text_color = "Recovery", "blue", "#60a5fa"
+                    strain_label, strain_color, strain_text_color = "Recovery", "#60a5fa", "#60a5fa" # Blue
                 elif strain < 150:
-                    strain_label, strain_color, strain_text_color = "Maintenance", "#10B981", "#10B981"
+                    strain_label, strain_color, strain_text_color = "Maintenance", "#10B981", "#10B981" # Green
                 elif strain < 300:
-                    strain_label, strain_color, strain_text_color = "Productive", "orange", "orange"
+                    strain_label, strain_color, strain_text_color = "Productive", "#f97316", "#f97316" # Orange
                 else:
-                    strain_label, strain_color, strain_text_color = "Overreaching", "red", "red"
+                    strain_label, strain_color, strain_text_color = "Overreaching", "#ef4444", "#ef4444" # Red
                 
-                # 4. Create the "Hot Card" with user-preferred shadow settings
+                # 4. Create the "Hot Card" with Dark Glass styling
+                # Generate CSS variables for this specific card's theme
+                
+                # Helper to convert hex to rgba-like string for our CSS variables
+                # Note: We are constructing the hex+alpha strings directly as requested
+                # Productive (#f97316) -> BG: #f9731626, Border: #f973164D, etc.
+                
+                strain_bg = f"{strain_color}26"          # 15%
+                strain_border = f"{strain_color}4D"      # 30%
+                strain_border_hover = f"{strain_color}80"# 50%
+                strain_shadow = f"{strain_color}1A"      # 10%
+                strain_shadow_hover = f"{strain_color}33"# 20%
+                
+                # Convert strain_color to RGB triplet for dynamic shadow
+                strain_rgb = self.hex_to_rgb(strain_color)
+                
                 activity_hash = d.get('db_hash')
+                
+                # Apply the .glass-card AND .interactive-card classes
                 card = ui.card().classes(
-                    'w-full p-4 bg-zinc-900 border border-zinc-800 '
-                    'cursor-pointer relative overflow-hidden group '
-                    'transform transition-all duration-300 ease-out '
-                    'shadow-lg rounded-xl ' 
-                    'hover:border-zinc-500 hover:shadow-[0_7px_17px_rgba(0,0,0,0.9)] hover:-translate-y-1 hover:bg-zinc-800'
-                ).style('max-width: 720px; margin: 0 auto;')
+                    'w-full p-4 glass-card interactive-card cursor-pointer relative overflow-hidden group'
+                ).style(
+                    f'max-width: 720px; margin: 0 auto; '
+                    f'--theme-color-rgb: {strain_rgb}; ' # Inject RGB triplet for hover shadow
+                    f'--strain-bg: {strain_bg}; '
+                    f'--strain-border: {strain_border}; '
+                    f'--strain-border-hover: {strain_border_hover}; '
+                    f'--strain-shadow: {strain_shadow}; '
+                    f'--strain-shadow-hover: {strain_shadow_hover};'
+                )
                 
                 if activity_hash:
                     card.on('click', lambda h=activity_hash: self.open_activity_detail_modal(h, from_feed=True))
@@ -2468,7 +3594,10 @@ root.destroy()
                         # --- ROW 2: Context Tags ---
                         with ui.row().classes('w-full items-center gap-2 mt-2'):
                             for tag in run_type_tag.split(' | '):
-                                ui.label(tag).classes('text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 tracking-wide')
+                                ui.label(tag).classes(
+                                    'text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 tracking-wide '
+                                    'cursor-pointer hover:brightness-125 hover:-translate-y-px hover:shadow-lg transition-all duration-200'
+                                )
                             
                             # --- UPDATED CHECK ---
                             # Check if the label exists AND is not the string "None"
@@ -2557,34 +3686,55 @@ root.destroy()
                                 
                                 if ef_above_avg and low_decouple:
                                     aero_verdict, aero_bg, aero_border, aero_text = 'Efficient', 'bg-emerald-500/10', 'border-emerald-700/30', 'text-emerald-400'
+                                elif not ef_above_avg and low_decouple:
+                                    aero_verdict, aero_bg, aero_border, aero_text = 'Base', 'bg-blue-500/10', 'border-blue-700/30', 'text-blue-400'
                                 elif ef_above_avg and not low_decouple:
                                     aero_verdict, aero_bg, aero_border, aero_text = 'Pushing', 'bg-orange-500/10', 'border-orange-700/30', 'text-orange-400'
-                                elif not ef_above_avg and low_decouple:
-                                    aero_verdict, aero_bg, aero_border, aero_text = 'Easy', 'bg-blue-500/10', 'border-blue-700/30', 'text-blue-400'
                                 else:
-                                    aero_verdict, aero_bg, aero_border, aero_text = 'Drifting', 'bg-red-500/10', 'border-red-700/30', 'text-red-400'
+                                    aero_verdict, aero_bg, aero_border, aero_text = 'Fatigued', 'bg-red-500/10', 'border-red-700/30', 'text-red-400'
                                 
-                                with ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {aero_bg} {aero_border}'):
-                                    ui.label('⚡').classes('text-sm')
-                                    ui.label('Aero:').classes(f'text-xs font-bold {aero_text}')
+                                verdict_emojis = {
+                                    'Efficient': '⚡', 'Base': '🧱', 'Pushing': '🔥', 'Fatigued': '⚠️'
+                                }
+                                aero_icon = verdict_emojis.get(aero_verdict, '⚡')
+                                
+                                # Fix Hover: Use explicit bg-opacity instead of brightness to avoid fading issue
+                                hover_bg = aero_bg.replace('/10', '/30') 
+
+                                aero_pill = ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {aero_bg} {aero_border} cursor-pointer hover:{hover_bg} transition-all')
+                                with aero_pill:
+                                    ui.label(aero_icon).classes('text-sm')
+                                    ui.label('Efficiency:').classes(f'text-xs font-bold {aero_text}')
                                     ui.label(aero_verdict).classes(f'text-xs font-bold {aero_text}')
+                                aero_pill.on('click.stop', lambda av=aero_verdict: self.show_aerobic_efficiency_info(highlight_verdict=av))
 
                                 # Form Status Pill
                                 form = analyze_form(d.get('avg_cadence'), d.get('avg_stance_time'), d.get('avg_step_length'), d.get('avg_vertical_oscillation'))
                                 if form['verdict'] != 'ANALYZING':
-                                    if form['verdict'] in ['ELITE FORM', 'GOOD FORM']:
+                                    # Match colors to Analyzer.py / Legend
+                                    if form['verdict'] == 'ELITE FORM':
                                         pill_bg, pill_border, pill_text = 'bg-emerald-500/10', 'border-emerald-700/30', 'text-emerald-400'
-                                    elif form['verdict'] in ['OVERSTRIDING', 'HEAVY FEET', 'INEFFICIENT']:
-                                        pill_bg, pill_border, pill_text = 'bg-amber-500/10', 'border-amber-700/30', 'text-amber-400'
-                                    elif form['verdict'] in ['LOW CADENCE', 'PLODDING']:
-                                        pill_bg, pill_border, pill_text = 'bg-red-500/10', 'border-red-700/30', 'text-red-400'
+                                    elif form['verdict'] == 'GOOD FORM':
+                                        # Fix: Good Form is Blue in legend/analyzer, not Emerald
+                                        pill_bg, pill_border, pill_text = 'bg-blue-500/10', 'border-blue-700/30', 'text-blue-400'
+                                    elif form['verdict'] == 'HEAVY FEET':
+                                        pill_bg, pill_border, pill_text = 'bg-orange-500/10', 'border-orange-700/30', 'text-orange-400'
+                                    elif form['verdict'] == 'PLODDING':
+                                        # Fix: Plodding is Yellow in legend/analyzer, not Red
+                                        pill_bg, pill_border, pill_text = 'bg-yellow-500/10', 'border-yellow-700/30', 'text-yellow-400'
+                                    elif form['verdict'] == 'HIKING / REST':
+                                        pill_bg, pill_border, pill_text = 'bg-blue-500/10', 'border-blue-700/30', 'text-blue-400'
                                     else:
+                                        # Fallback for unexpected verdicts
                                         pill_bg, pill_border, pill_text = 'bg-slate-500/10', 'border-slate-700/30', 'text-slate-400'
                                     
-                                    with ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {pill_bg} {pill_border}'):
+                                    form_hover_bg = pill_bg.replace('/10', '/30')
+                                    form_pill = ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {pill_bg} {pill_border} cursor-pointer hover:{form_hover_bg} transition-all')
+                                    with form_pill:
                                         ui.label('🦶').classes('text-sm')
                                         ui.label('Form:').classes(f'text-xs font-bold {pill_text}')
                                         ui.label(form['verdict'].title()).classes(f'text-xs font-bold {pill_text}')
+                                    form_pill.on('click.stop', lambda fv=form['verdict']: self.show_form_info(highlight_verdict=fv))
     
     def show_hrr_info(self):
         """
@@ -2899,6 +4049,184 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
         
         dialog.open()
     
+    def show_aerobic_efficiency_info(self, highlight_verdict=None):
+        """
+        Show informational modal explaining Aerobic Efficiency, EF, Decoupling, and all 4 verdicts.
+        If highlight_verdict is provided, that verdict section gets visually emphasized.
+        """
+        verdicts = [
+            {
+                'key': 'Efficient',
+                'condition': 'High EF + Low Drift',
+                'meaning': 'Your output is high relative to your effort. This is the sweet spot of training.',
+                'color': 'text-emerald-400',
+                'bg': 'bg-emerald-500/10',
+                'border': 'border-emerald-500/30',
+                'icon': '⚡'
+            },
+            {
+                'key': 'Pushing',
+                'condition': 'High EF + High Drift',
+                'meaning': 'You were putting in effort and intensity, this is good training.',
+                'color': 'text-orange-400',
+                'bg': 'bg-orange-500/10',
+                'border': 'border-orange-500/30',
+                'icon': '🔥'
+            },
+            {
+                'key': 'Base',
+                'condition': 'Low EF + Low Drift',
+                'meaning': 'This run is building your foundation.',
+                'color': 'text-blue-400',
+                'bg': 'bg-blue-500/10',
+                'border': 'border-blue-500/30',
+                'icon': '🧱'
+            },
+            {
+                'key': 'Fatigued',
+                'condition': 'Low EF + High Drift',
+                'meaning': 'Clear warning label: output is low AND heart rate is rising. Your body is tired.',
+                'color': 'text-red-400',
+                'bg': 'bg-red-500/10',
+                'border': 'border-red-500/30',
+                'icon': '⚠️'
+            }
+        ]
+        
+        with ui.dialog() as dialog, ui.card().classes('p-6 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl max-w-xl'):
+            with ui.column().classes('gap-3'):
+                ui.label('Understanding Aerobic Efficiency').classes('text-xl font-bold text-white')
+                ui.separator().classes('bg-zinc-700')
+                
+                # EF Explanation
+                with ui.column().classes('gap-1'):
+                    ui.label('EFFICIENCY FACTOR (EF)').classes('text-[10px] font-bold text-zinc-500 tracking-widest')
+                    ui.label('Speed ÷ Heart Rate — how much pace you get per heartbeat. Higher is better. Improving EF over weeks means your aerobic engine is growing.').classes('text-sm text-zinc-300 leading-relaxed')
+                
+                # Decoupling Explanation
+                with ui.column().classes('gap-1 mt-1'):
+                    ui.label('AEROBIC DECOUPLING').classes('text-[10px] font-bold text-zinc-500 tracking-widest')
+                    ui.label('Cardiac drift — how much your heart rate rises while pace stays steady. Compares 1st half EF to 2nd half EF. Target < 5% for endurance fitness.').classes('text-sm text-zinc-300 leading-relaxed')
+                
+                ui.separator().classes('bg-zinc-700 mt-1')
+                
+                # Verdict Cards
+                ui.label('VERDICTS').classes('text-[10px] font-bold text-zinc-500 tracking-widest')
+                
+                for v in verdicts:
+                    is_highlighted = highlight_verdict and v['key'] == highlight_verdict
+                    ring = 'ring-2 ring-white/30' if is_highlighted else ''
+                    scale = 'scale-[1.02]' if is_highlighted else 'opacity-80'
+                    
+                    with ui.row().classes(f'items-start gap-3 p-3 rounded-lg border {v["bg"]} {v["border"]} {ring} {scale} transition-all'):
+                        ui.label(v['icon']).classes('text-lg mt-0.5')
+                        with ui.column().classes('gap-0.5 flex-1'):
+                            with ui.row().classes('items-center gap-2'):
+                                ui.label(v['key']).classes(f'text-sm font-bold {v["color"]}')
+                                ui.label(f'— {v["condition"]}').classes('text-xs text-zinc-500')
+                            ui.label(v['meaning']).classes('text-xs text-zinc-400 leading-relaxed')
+                
+                # Tip
+                with ui.row().classes('items-start gap-2 mt-2 p-3 bg-blue-500/10 rounded-lg border border-blue-500/20'):
+                    ui.icon('lightbulb').classes('text-blue-400 text-sm mt-0.5')
+                    ui.label('The trend graph plots each run as a dot using these two axes. Click any dot to see that activity\'s details.').classes('text-sm italic text-blue-200 flex-1')
+                
+                ui.button('GOT IT', on_click=dialog.close).classes('mt-3 w-full bg-zinc-800 hover:bg-zinc-700 text-white font-bold')
+        
+        dialog.open()
+    
+    def show_form_info(self, highlight_verdict=None):
+        """
+        Show informational modal explaining Running Form verdicts.
+        If highlight_verdict is provided, that verdict section gets visually emphasized.
+        """
+        verdicts = [
+            {
+                'key': 'Elite Form',
+                'raw': 'ELITE FORM',
+                'icon': '✅',
+                'color': 'text-emerald-400',
+                'bg': 'bg-emerald-500/10',
+                'border': 'border-emerald-500/30',
+                'range': '170+ SPM',
+                'meaning': 'Pro-level mechanics. Fast turnover minimizes ground contact, reduces braking forces, and lowers injury risk. This is the goal.'
+            },
+            {
+                'key': 'Good Form',
+                'raw': 'GOOD FORM',
+                'icon': '👍',
+                'color': 'text-blue-400',
+                'bg': 'bg-blue-500/10',
+                'border': 'border-blue-500/30',
+                'range': '160–169 SPM',
+                'meaning': 'Solid, balanced mechanics. You\'re in a healthy cadence zone. Small gains still possible with drills and strides.'
+            },
+            {
+                'key': 'Heavy Feet',
+                'raw': 'HEAVY FEET',
+                'icon': '⚠️',
+                'color': 'text-orange-400',
+                'bg': 'bg-orange-500/10',
+                'border': 'border-orange-500/30',
+                'range': '155–159 SPM',
+                'meaning': 'Cadence is low. You\'re spending too long on the ground each step, wasting energy on vertical bounce. Focus on quick, light turnover.'
+            },
+            {
+                'key': 'Plodding',
+                'raw': 'PLODDING',
+                'icon': '🐢',
+                'color': 'text-yellow-400',
+                'bg': 'bg-yellow-500/10',
+                'border': 'border-yellow-500/30',
+                'range': '135–154 SPM',
+                'meaning': 'Sluggish turnover with high ground contact. This pattern increases impact forces and wastes energy. Try cadence drills or a metronome.'
+            },
+            {
+                'key': 'Hiking / Rest',
+                'raw': 'HIKING / REST',
+                'icon': '🥾',
+                'color': 'text-blue-400',
+                'bg': 'bg-blue-500/10',
+                'border': 'border-blue-500/30',
+                'range': '< 135 SPM',
+                'meaning': 'Power hiking or recovery interval. Low cadence here is expected — this isn\'t a running gait.'
+            }
+        ]
+        
+        with ui.dialog() as dialog, ui.card().classes('p-6 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl max-w-xl'):
+            with ui.column().classes('gap-3'):
+                ui.label('Understanding Running Form').classes('text-xl font-bold text-white')
+                ui.separator().classes('bg-zinc-700')
+                
+                with ui.column().classes('gap-1'):
+                    ui.label('WHAT IS CADENCE?').classes('text-[10px] font-bold text-zinc-500 tracking-widest')
+                    ui.label('Steps per minute (SPM). Higher cadence generally means shorter ground contact, less braking force, and more efficient energy transfer. Most elite runners are 170–185 SPM.').classes('text-sm text-zinc-300 leading-relaxed')
+                
+                ui.separator().classes('bg-zinc-700 mt-1')
+                
+                ui.label('VERDICTS').classes('text-[10px] font-bold text-zinc-500 tracking-widest')
+                
+                for v in verdicts:
+                    is_highlighted = highlight_verdict and (v['key'] == highlight_verdict or v['raw'] == highlight_verdict)
+                    ring = 'ring-2 ring-white/30' if is_highlighted else ''
+                    scale = 'scale-[1.02]' if is_highlighted else 'opacity-80'
+                    
+                    with ui.row().classes(f'items-start gap-3 p-3 rounded-lg border {v["bg"]} {v["border"]} {ring} {scale} transition-all'):
+                        ui.label(v['icon']).classes('text-lg mt-0.5')
+                        with ui.column().classes('gap-0.5 flex-1'):
+                            with ui.row().classes('items-center gap-2'):
+                                ui.label(v['key']).classes(f'text-sm font-bold {v["color"]}')
+                                ui.label(f'({v["range"]})').classes('text-xs text-zinc-500')
+                            ui.label(v['meaning']).classes('text-xs text-zinc-400 leading-relaxed')
+                
+                with ui.row().classes('items-start gap-2 mt-2 p-3 bg-blue-500/10 rounded-lg border border-blue-500/20'):
+                    ui.icon('lightbulb').classes('text-blue-400 text-sm mt-0.5')
+                    ui.label('Cadence is pace-dependent — slower paces naturally have lower cadence. Compare cadence at similar paces for the most useful signal.').classes('text-sm italic text-blue-200 flex-1')
+                
+                ui.button('GOT IT', on_click=dialog.close).classes('mt-3 w-full bg-zinc-800 hover:bg-zinc-700 text-white font-bold')
+        
+        dialog.open()
+
     def show_load_info(self):
         """
         Show informational modal about Training Load.
@@ -3161,7 +4489,7 @@ Activity Breakdown: {activity_breakdown}
                 
                 # --- ROW 1: DISTANCE (The Scope) ---
                 with ui.row().classes('w-full items-center'):
-                    with ui.row().classes('bg-zinc-200/80 p-1 rounded-lg gap-0 shadow-[inset_0_1px_2px_rgba(0,0,0,0.06)] border border-zinc-200/50'):
+                    with ui.row().classes('bg-zinc-900 border border-zinc-800 p-1 rounded-lg gap-1'):
                         for f in dist_filters:
                             if f['id'] == 'all':
                                 is_active = not any(k in self.active_filters for k in ['short', 'med', 'long_dist'])
@@ -3169,9 +4497,9 @@ Activity Breakdown: {activity_breakdown}
                                 is_active = f['id'] in self.active_filters
                             
                             if is_active:
-                                classes = "bg-white text-black shadow-sm font-bold ring-1 ring-black/5"
+                                classes = "bg-zinc-800 text-white shadow-lg shadow-zinc-900/50 border border-zinc-700 font-bold"
                             else:
-                                classes = "bg-transparent text-zinc-500 hover:text-zinc-800 font-medium"
+                                classes = "bg-transparent text-zinc-500 hover:text-zinc-300 font-medium"
                             
                             ui.button(f['label'], on_click=lambda id=f['id']: self.toggle_filter(id), color=None).props('flat dense no-caps ripple=False').classes(
                                 f"rounded-md px-4 py-1 text-xs transition-all duration-200 no-ripple {classes}"
@@ -3191,9 +4519,13 @@ Activity Breakdown: {activity_breakdown}
                         if is_active:
                             classes = f"filter-active bg-{color}-500 text-white shadow-md border border-{color}-600/20 transform scale-105"
                         else:
-                            classes = "bg-white text-zinc-500 border border-zinc-300/80 hover:border-zinc-400 hover:text-zinc-700 hover:shadow-sm shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
+                            # Context Tags: "Glass Capsule" Style
+                            # Unselected: Visible container with grey border
+                            # Hover: Glows with tag's specific color
+                            classes = f"bg-zinc-800/20 text-zinc-300 border border-zinc-700 hover:bg-white/10 hover:border-{color}-500 hover:text-{color}-400 hover:shadow-[0_0_15px_-3px_currentColor] hover:-translate-y-px transition-all duration-300"
 
-                        ui.button(label, on_click=lambda t=tag_name: self.toggle_filter(t), color=None).props('flat dense no-caps ripple=False').classes(
+                        # Use 'label' instead of 'tag_name' to show the emoji icon
+                        ui.button(label.replace('🏷️', '🏔️'), on_click=lambda t=tag_name: self.toggle_filter(t), color=None).props('flat dense no-caps ripple=False').classes(
                             f"rounded-full px-4 py-1 text-xs font-bold transition-all duration-200 no-ripple {classes}"
                         )
 
@@ -3209,7 +4541,8 @@ Activity Breakdown: {activity_breakdown}
                         if is_active:
                             classes = f"filter-active bg-{color}-500 text-white shadow-md border border-{color}-600/20"
                         else:
-                            classes = "bg-white text-zinc-400 border border-zinc-200 hover:border-zinc-300 hover:text-zinc-600"
+                            # Refined Dark Theme: Outlined with Colored Glow
+                            classes = f"bg-zinc-900 text-{color}-400 border border-{color}-500/50 hover:border-{color}-400 hover:shadow-[0_0_10px_currentColor] hover:-translate-y-px transition-all duration-300"
 
                         ui.button(tag_name, on_click=lambda t=tag_name: self.toggle_filter(t), color=None).props('flat dense no-caps ripple=False').classes(
                             f"rounded-md px-3 py-1 text-[10px] font-bold tracking-wider uppercase transition-all duration-200 no-ripple {classes}"
@@ -3360,6 +4693,32 @@ Activity Breakdown: {activity_breakdown}
         # --- 4. RENDER TABLE ---
         with self.grid_container:
             with ui.card().classes('w-full bg-zinc-900/80 p-0 border border-zinc-800 shadow-2xl overflow-hidden').style('border-radius: 12px;'):
+
+                # --- EVENT HANDLERS ---
+
+                def on_selection(e):
+                    # Use table.selected (NiceGUI's binding) - NOT e.args (raw Quasar event)
+                    # table.selected always reflects the current cumulative selection state.
+                    self.show_floating_action_bar(table.selected)
+
+                async def handle_row_action(e):
+                    payload = e.args if isinstance(e.args, dict) else {}
+                    action = payload.get('action')
+                    row = payload.get('row') if isinstance(payload.get('row'), dict) else None
+
+                    if not row:
+                        return
+
+                    if action == 'analyze':
+                        activity_hash = row.get('hash')
+                        if activity_hash:
+                            await self.open_activity_detail_modal(activity_hash, from_feed=True)
+                    elif action == 'download':
+                        await self.download_fit_file(row)
+                    elif action == 'delete':
+                        activity_hash = row.get('hash')
+                        filename = row.get('full_filename')
+                        await self.delete_activity_inline(activity_hash, filename)
                 
                 table = ui.table(
                     columns=columns, 
@@ -3367,46 +4726,15 @@ Activity Breakdown: {activity_breakdown}
                     row_key='id',       # Matches our STABLE ID
                     selection='multiple',
                     pagination={'rowsPerPage': 0, 'sortBy': self.current_sort_by, 'descending': self.current_sort_desc},
+                    on_select=on_selection,
                 ).classes('w-full h-full text-sm sticky-header-table')
                 self.activities_table = table  # Store ref for selection clearing
 
                 # Preserved Dark Mode - REMOVED virtual-scroll to fix event trapping
                 table.props('flat bordered dense dark')
 
-                # --- EVENT HANDLERS ---
-                
-                def on_selection(e):
-                    # Use table.selected (NiceGUI's binding) - NOT e.args (raw Quasar event)
-                    # table.selected always reflects the current cumulative selection state.
-                    self.show_floating_action_bar(table.selected)
-
-                # Button Handlers - receive full row object via $parent.$emit
-                async def handle_analyze(e):
-                    row = e.args
-                    activity_hash = row.get('hash') if isinstance(row, dict) else None
-                    print(f"DEBUG: Analyze clicked, hash={activity_hash}")
-                    if activity_hash:
-                        await self.open_activity_detail_modal(activity_hash, from_feed=True)
-
-                async def handle_download(e):
-                    row = e.args
-                    print(f"DEBUG: Download clicked")
-                    if isinstance(row, dict):
-                        await self.download_fit_file(row)
-
-                async def handle_delete(e):
-                    row = e.args
-                    if isinstance(row, dict):
-                        activity_hash = row.get('hash')
-                        filename = row.get('full_filename')
-                        print(f"DEBUG: Delete clicked, hash={activity_hash}")
-                        await self.delete_activity_inline(activity_hash, filename)
-
-                # Bind Events
-                table.on('selection', on_selection)
-                table.on('click-analyze', handle_analyze)
-                table.on('click-download', handle_download)
-                table.on('click-delete', handle_delete)
+                # Bind row action events emitted from custom action slot
+                table.on('row-action', handle_row_action)
 
                 # --- SLOTS ---
                 
@@ -3435,17 +4763,17 @@ Activity Breakdown: {activity_breakdown}
                         <div class="flex flex-nowrap items-center justify-end gap-1 relative z-10">
                             <q-btn flat dense round icon="visibility" size="sm" 
                                 class="action-btn no-ripple text-zinc-400 hover:text-white" :ripple="false"
-                                @click.stop="$parent.$emit('click-analyze', props.row)">
+                                @click.stop="$parent.$emit('row-action', { action: 'analyze', row: props.row })">
                                 <q-tooltip>Analyze</q-tooltip>
                             </q-btn>
                             <q-btn flat dense round icon="download" size="sm" 
                                 class="action-btn no-ripple text-zinc-400 hover:text-white" :ripple="false"
-                                @click.stop="$parent.$emit('click-download', props.row)">
+                                @click.stop="$parent.$emit('row-action', { action: 'download', row: props.row })">
                                 <q-tooltip>Save .FIT</q-tooltip>
                             </q-btn>
                             <q-btn flat dense round icon="delete" size="sm" 
                                 class="action-btn no-ripple text-zinc-400 hover:text-white" :ripple="false"
-                                @click.stop="$parent.$emit('click-delete', props.row)">
+                                @click.stop="$parent.$emit('row-action', { action: 'delete', row: props.row })">
                                 <q-tooltip>Delete</q-tooltip>
                             </q-btn>
                         </div>
@@ -3784,10 +5112,12 @@ Activity Breakdown: {activity_breakdown}
             barmode='stack', template='plotly_dark',
             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
             height=300, margin=dict(l=40, r=20, t=20, b=80),
-            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal"),
-            bargap=0.35, xaxis=dict(tickangle=0, showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-            yaxis=dict(title='Miles', showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-            clickmode='event'
+            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal", font=dict(color='#a1a1aa')),
+            bargap=0.35, 
+            xaxis=dict(tickangle=0, showgrid=True, gridcolor='#27272a', tickfont=dict(color='#a1a1aa')),
+            yaxis=dict(title=dict(text='Miles', font=dict(color='#a1a1aa')), showgrid=True, gridcolor='#27272a', tickfont=dict(color='#a1a1aa')),
+            clickmode='event',
+            font=dict(color='#a1a1aa')
         )
         fig.update_layout(modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']})
         
@@ -3899,10 +5229,12 @@ Activity Breakdown: {activity_breakdown}
             barmode='stack', template='plotly_dark',
             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
             height=300, margin=dict(l=40, r=20, t=20, b=80),
-            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal"),
-            bargap=0.35, xaxis=dict(tickangle=0, showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-            yaxis=dict(title='Miles', showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-            clickmode='event'
+            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal", font=dict(color='#a1a1aa')),
+            bargap=0.35, 
+            xaxis=dict(tickangle=0, showgrid=True, gridcolor='#27272a', tickfont=dict(color='#a1a1aa')),
+            yaxis=dict(title=dict(text='Miles', font=dict(color='#a1a1aa')), showgrid=True, gridcolor='#27272a', tickfont=dict(color='#a1a1aa')),
+            clickmode='event',
+            font=dict(color='#a1a1aa')
         )
         fig.update_layout(modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']})
         
@@ -4020,10 +5352,12 @@ Activity Breakdown: {activity_breakdown}
             barmode='stack', template='plotly_dark',
             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
             height=300, margin=dict(l=40, r=20, t=20, b=80),
-            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal"),
-            bargap=0.35, xaxis=dict(tickangle=0, showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-            yaxis=dict(title='Miles', showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-            clickmode='event'
+            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal", font=dict(color='#a1a1aa')),
+            bargap=0.35, 
+            xaxis=dict(tickangle=0, showgrid=True, gridcolor='#27272a', tickfont=dict(color='#a1a1aa')),
+            yaxis=dict(title=dict(text='Miles', font=dict(color='#a1a1aa')), showgrid=True, gridcolor='#27272a', tickfont=dict(color='#a1a1aa')),
+            clickmode='event',
+            font=dict(color='#a1a1aa')
         )
         fig.update_layout(modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']})
         
@@ -4140,7 +5474,11 @@ Activity Breakdown: {activity_breakdown}
     def generate_hr_zones_chart(self):
         """Generate weekly volume chart grouped by HEART RATE ZONE (HR Zones lens).
         Y-axis = minutes. Each activity assigned to dominant zone via avg_hr/max_hr ratio."""
-        if self.df is None or self.df.empty or not self.activities_data:
+        if self.df is None:
+            return None
+        if self.df.empty:
+            return None
+        if not self.activities_data:
             return None
         
         zone_data = []
@@ -4248,10 +5586,12 @@ Activity Breakdown: {activity_breakdown}
             barmode='stack', template='plotly_dark',
             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
             height=300, margin=dict(l=40, r=20, t=20, b=80),
-            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal"),
-            bargap=0.35, xaxis=dict(tickangle=0, showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-            yaxis=dict(title='Minutes', showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-            clickmode='event'
+            showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right", traceorder="normal", font=dict(color='#a1a1aa')),
+            bargap=0.35, 
+            xaxis=dict(tickangle=0, showgrid=True, gridcolor='#27272a', tickfont=dict(color='#a1a1aa')),
+            yaxis=dict(title=dict(text='Minutes', font=dict(color='#a1a1aa')), showgrid=True, gridcolor='#27272a', tickfont=dict(color='#a1a1aa')),
+            clickmode='event',
+            font=dict(color='#a1a1aa')
         )
         fig.update_layout(modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']})
         
@@ -4419,22 +5759,25 @@ Activity Breakdown: {activity_breakdown}
         decouple_threshold = 5.0
         
         groups = {
-            'Peak':     self.df[(self.df['efficiency_factor'] >= mean_ef) & (self.df['decoupling'] <= decouple_threshold)],
-            'Base':     self.df[(self.df['efficiency_factor'] < mean_ef) & (self.df['decoupling'] <= decouple_threshold)],
-            'Costly':   self.df[(self.df['efficiency_factor'] >= mean_ef) & (self.df['decoupling'] > decouple_threshold)],
-            'Struggle': self.df[(self.df['efficiency_factor'] < mean_ef) & (self.df['decoupling'] > decouple_threshold)],
+            'Efficient': self.df[(self.df['efficiency_factor'] >= mean_ef) & (self.df['decoupling'] <= decouple_threshold)],
+            'Base':      self.df[(self.df['efficiency_factor'] < mean_ef) & (self.df['decoupling'] <= decouple_threshold)],
+            'Pushing':   self.df[(self.df['efficiency_factor'] >= mean_ef) & (self.df['decoupling'] > decouple_threshold)],
+            'Fatigued':  self.df[(self.df['efficiency_factor'] < mean_ef) & (self.df['decoupling'] > decouple_threshold)],
         }
         
         configs = {
-            'Peak':     {'color': '#10B981', 'label': 'Peak Run',       'symbol': 'circle',       'desc': 'Fast & Stable'},
-            'Base':     {'color': '#eab308', 'label': 'Base Run',       'symbol': 'circle',       'desc': 'Slow & Stable'},
-            'Costly':   {'color': '#f97316', 'label': 'Expensive Run',  'symbol': 'triangle-up',  'desc': 'Fast but Drift'},
-            'Struggle': {'color': '#ef4444', 'label': 'Struggle Run',   'symbol': 'x',            'desc': 'Slow & Drift'},
+            'Efficient': {'color': '#10B981', 'label': 'Efficient', 'symbol': 'circle',      'desc': 'High EF & Stable'},
+            'Base':      {'color': '#3b82f6', 'label': 'Base',      'symbol': 'circle',      'desc': 'Building Foundation'},
+            'Pushing':   {'color': '#f97316', 'label': 'Pushing',   'symbol': 'triangle-up', 'desc': 'Higher Output, Drift'},
+            'Fatigued':  {'color': '#ef4444', 'label': 'Fatigued',  'symbol': 'x',           'desc': 'Fatigue / Warning'},
         }
         
         for key, group in groups.items():
             if not group.empty:
                 cfg = configs[key]
+                # Construct customdata: [decoupling, db_hash] - FIX: Use db_hash for click handler
+                custom_data = list(zip(group['decoupling'], group.get('db_hash', [''] * len(group))))
+                
                 fig.add_trace(go.Scatter(
                     x=group['date_obj'], y=group['efficiency_factor'],
                     mode='markers', name=cfg['desc'],
@@ -4446,10 +5789,10 @@ Activity Breakdown: {activity_breakdown}
                         f"<b>{cfg['label']}</b><br>"
                         f"<i style='color:#aaa'>{cfg['desc']}</i><br>"
                         "EF: %{y:.2f}<br>"
-                        "Decoupling: %{customdata:.1f}%"
+                        "Decoupling: %{customdata[0]:.1f}%"
                         "<extra></extra>"
                     ),
-                    customdata=group['decoupling']
+                    customdata=custom_data
                 ), secondary_y=False)
         
         # --- 6. Trend Dashed Line ---
@@ -4474,19 +5817,20 @@ Activity Breakdown: {activity_breakdown}
             margin=dict(l=40, r=40, t=20, b=40),
             showlegend=False,
             hovermode='closest',
-            hoverlabel=dict(bgcolor='#18181b', font_color='white')
+            hoverlabel=dict(bgcolor='#18181b', font_color='white'),
+            font=dict(color='#a1a1aa')
         )
         
         fig.update_yaxes(
-            title_text="Running Efficiency", color="#10B981",
-            secondary_y=False, showgrid=True, gridcolor='rgba(255, 255, 255, 0.05)'
+            title_text="Running Efficiency", title_font=dict(color="#10B981"), tickfont=dict(color="#a1a1aa"),
+            secondary_y=False, showgrid=True, gridcolor='#27272a'
         )
         fig.update_yaxes(
-            title_text="Decoupling (%)", color="#ff4d4d",
+            title_text="Decoupling (%)", title_font=dict(color="#ff4d4d"), tickfont=dict(color="#a1a1aa"),
             secondary_y=True, range=[-5, max(20, self.df['decoupling'].max() + 2)],
             showgrid=False
         )
-        fig.update_xaxes(showgrid=True, gridcolor='rgba(255, 255, 255, 0.05)')
+        fig.update_xaxes(showgrid=True, gridcolor='#27272a', tickfont=dict(color="#a1a1aa"))
         fig.update_layout(
             modebar={'remove': ['zoom', 'pan', 'select', 'lasso2d', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale', 'toImage']}
         )
@@ -4543,7 +5887,12 @@ Activity Breakdown: {activity_breakdown}
                 # RESTORED: The crisp indigo dotted line
                 line=dict(color='#6366f1', width=2, dash='dot'), 
                 name='Cadence',
-                customdata=list(zip(form_verdicts, form_colors, self.df['date_obj'].dt.strftime('%b %d, %Y'))),
+                customdata=list(zip(
+                    form_verdicts,  # 0
+                    form_colors,  # 1
+                    self.df['date_obj'].dt.strftime('%b %d, %Y'),  # 2
+                    self.df['db_hash'] if 'db_hash' in self.df.columns else [''] * len(self.df)  # 3: Activity hash
+                )),
                 hovertemplate=(
                     '<span style="color:#a1a1aa; font-size:11px;">%{customdata[2]}</span><br>'
                     '<b>%{y:.0f} SPM</b><br>'
@@ -4563,14 +5912,17 @@ Activity Breakdown: {activity_breakdown}
             showlegend=False,
             hovermode='closest',
             hoverlabel=dict(bgcolor='#18181b', font_color='white'),
+            font=dict(color='#a1a1aa'),
             yaxis=dict(
-                title='Cadence (SPM)',
+                title=dict(text='Cadence (SPM)', font=dict(color='#a1a1aa')),
+                tickfont=dict(color='#a1a1aa'),
                 showgrid=True,
-                gridcolor='rgba(255, 255, 255, 0.1)'
+                gridcolor='#27272a'
             ),
             xaxis=dict(
+                tickfont=dict(color='#a1a1aa'),
                 showgrid=True,
-                gridcolor='rgba(255, 255, 255, 0.1)'
+                gridcolor='#27272a'
             )
         )
         
@@ -4827,6 +6179,9 @@ Activity Breakdown: {activity_breakdown}
                         max_speeds.append(0)
                         elevations.append(0)
                 
+                # Collect db_hash for click-to-modal
+                hashes = df_group['db_hash'].tolist() if 'db_hash' in df_group.columns else [''] * len(df_group)
+                
                 fig.add_trace(
                     go.Scatter(
                         x=df_group['date_obj'], 
@@ -4849,7 +6204,8 @@ Activity Breakdown: {activity_breakdown}
                             max_speeds,  # 7: Max Speed
                             elevations,  # 8: Elevation gain
                             [insight] * len(df_group),  # 9: Insight text
-                            [color] * len(df_group)  # 10: Dot color
+                            [color] * len(df_group),  # 10: Dot color
+                            hashes  # 11: Activity hash for click-to-modal
                         )),
                         hovertemplate=(
                             "<b style='font-size:14px'>%{customdata[0]}</b><br>"
@@ -4896,7 +6252,8 @@ Activity Breakdown: {activity_breakdown}
                 ),
                 customdata=list(zip(
                     cadence_insights,  # 0: Cadence insight text
-                    cad_colors  # 1: Dot color
+                    cad_colors,  # 1: Dot color
+                    self.df['db_hash'] if 'db_hash' in self.df.columns else [''] * len(self.df)  # 2: Activity hash
                 )),
                 hovertemplate=(
                     "Cadence: <b>%{y} spm</b><br>"
@@ -4918,8 +6275,11 @@ Activity Breakdown: {activity_breakdown}
                     f"<b>Training Trends</b><br>"
                     f"<span style='font-size: 14px; color: {trend_color};' id='trend-subtitle'>{trend_msg}</span>"
                 ),
+                font=dict(color='#e4e4e7')
             ),
             template="plotly_dark",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
             height=900, 
             showlegend=True,
             legend=dict(
@@ -4928,35 +6288,36 @@ Activity Breakdown: {activity_breakdown}
                 y=0.70,  # Position on row 2 (middle section)
                 xanchor="right",
                 x=0.99,  # Position at right edge
-                bgcolor="rgba(26, 26, 26, 0.85)",  # Semi-transparent dark background
-                bordercolor="rgba(255, 255, 255, 0.1)",  # Subtle border
+                bgcolor="rgba(24, 24, 27, 0.8)",  # Zinc-900 transparent
+                bordercolor="#27272a",  # Zinc-800
                 borderwidth=1,
-                font=dict(size=11)
+                font=dict(size=11, color='#a1a1aa')
             ),
             margin=dict(l=60, r=20, t=100, b=40),  # Reduced right margin to eliminate gap
             hoverlabel=dict(
-                bgcolor="#1F1F1F", 
-                bordercolor="#444", 
-                font_color="white"
+                bgcolor="#18181b", 
+                bordercolor="#27272a", 
+                font_color="#e4e4e7"
             ),
             modebar={
                 'remove': ['toImage', 'select2d', 'lasso2d', 'autoScale2d', 'resetScale2d', 'zoom', 'pan', 'zoomIn', 'zoomOut', 'autoScale', 'resetScale']
             },
             dragmode='zoom',
-            hovermode='closest'
+            hovermode='closest',
+            font=dict(family="Inter, sans-serif", color='#a1a1aa')
         )
         
         # Axis Styling
         fig.update_yaxes(
             title_text="[Gains] Running Efficiency", 
-            color="#10B981",  # Modern emerald green
+            title_font=dict(color="#10B981"), tickfont=dict(color="#a1a1aa"),
             row=2, col=1, secondary_y=False,
             showgrid=True,
-            gridcolor='rgba(255, 255, 255, 0.1)'
+            gridcolor='#27272a'
         )
         fig.update_yaxes(
             title_text="Decoupling (%)", 
-            color="#ff4d4d", 
+            title_font=dict(color="#ff4d4d"), tickfont=dict(color="#a1a1aa"),
             row=2, col=1, secondary_y=True, 
             range=[-5, max(20, self.df['decoupling'].max()+2)],
             showgrid=False
@@ -4965,19 +6326,19 @@ Activity Breakdown: {activity_breakdown}
         # Row 1 Y-axis (Weekly Volume)
         fig.update_yaxes(
             title_text="Miles",
-            color="white",
+            title_font=dict(color="#a1a1aa"), tickfont=dict(color="#a1a1aa"),
             row=1, col=1,
             showgrid=True,
-            gridcolor='rgba(255, 255, 255, 0.1)'
+            gridcolor='#27272a'
         )
         
         # Row 3 Y-axis (Cadence)
         fig.update_yaxes(
             title_text="Cadence (spm)", 
-            color="white", 
+            title_font=dict(color="#a1a1aa"), tickfont=dict(color="#a1a1aa"),
             row=3, col=1,
             showgrid=True,
-            gridcolor='rgba(255, 255, 255, 0.1)'
+            gridcolor='#27272a'
         )
         
         # Update layout to enable stacked bars for row 1
@@ -4988,13 +6349,20 @@ Activity Breakdown: {activity_breakdown}
             row=1, col=1,
             showticklabels=True,  # Show dates on top graph
             showgrid=True,
-            gridcolor='rgba(255, 255, 255, 0.1)'
+            gridcolor='#27272a',
+            tickfont=dict(color="#a1a1aa")
         )
         fig.update_xaxes(
             row=2, col=1,
             showticklabels=True,  # Show dates on middle graph
             showgrid=True,
-            gridcolor='rgba(255, 255, 255, 0.1)'
+            gridcolor='#27272a',
+            tickfont=dict(color="#a1a1aa")
+        )
+        fig.update_xaxes(
+            row=3, col=1,
+            gridcolor='#27272a',
+            tickfont=dict(color="#a1a1aa")
         )
         fig.update_xaxes(
             row=3, col=1,
@@ -5033,11 +6401,11 @@ Activity Breakdown: {activity_breakdown}
         
         # Verdict Thresholds (Matching the Legend Terms)
         if broken_ratio < 10:
-            return 'HIGH QUALITY', '#10b981', 'bg-emerald-500/20'
+            return 'High Quality Miles', '#10b981', 'bg-emerald-500/20'
         elif broken_ratio < 25:
-            return 'STRUCTURAL', '#3b82f6', 'bg-blue-500/20'
+            return 'Structural Miles', '#3b82f6', 'bg-blue-500/20'
         else:
-            return 'BROKEN', '#ef4444', 'bg-red-500/20'
+            return 'Broken Miles', '#ef4444', 'bg-red-500/20'
     
     def calculate_cadence_verdict(self, df):
         """
@@ -5224,18 +6592,19 @@ Activity Breakdown: {activity_breakdown}
                     vol_subtitle = 'Breakdown in quality of miles (click any section to inspect runs)'
                 
                 if volume_fig:
-                    # ADDED 'relative' class to the card so we can pin the icon
-                    with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8 relative').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
+                    with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
                         
-                        # The Silicon Valley Info Icon (ABSOLUTE POSITIONED)
-                        ui.icon('help_outline').classes('absolute top-5 right-5 text-zinc-500 hover:text-white transition-colors duration-200 cursor-pointer text-2xl').on(
-                            'click', lambda: self.show_volume_info()
-                        )
-
-                        # Header Row: Title + Verdict Badge
+                        # Header Row: Title + ❓ Icon + Verdict Badge (INLINE)
                         with ui.row().classes('w-full items-center gap-3 mb-1'):
                             ui.label('Training Volume').classes('text-xl font-bold text-white')
+                            
+                            # Verdict Badge
                             self.volume_verdict_label = ui.label(f'{vol_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}').style(f'color: {vol_color};')
+                            
+                            # Info Icon (inline)
+                            ui.icon('help_outline').classes('text-zinc-500 hover:text-white transition-colors duration-200 cursor-pointer text-xl ml-auto').on(
+                                'click', lambda: self.show_volume_info()
+                            )
                         
                         # Subtitle (lens-adaptive)
                         self.volume_subtitle_label = ui.label(vol_subtitle).classes('text-sm text-zinc-400 mb-3')
@@ -5279,11 +6648,13 @@ Activity Breakdown: {activity_breakdown}
                     # Calculate efficiency verdict
                     eff_verdict, eff_color, eff_bg = self.calculate_efficiency_verdict(self.df)
                     
-                    with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
+                    with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8 h-full flex flex-col justify-between').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
                         # Header with verdict badge
                         with ui.row().classes('w-full items-center gap-3 mb-1'):
                             ui.label('Aerobic Efficiency').classes('text-xl font-bold text-white')
                             self.efficiency_verdict_label = ui.label(f'{eff_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {eff_bg}').style(f'color: {eff_color};')
+                            ae_info_icon = ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-lg transition-colors')
+                            ae_info_icon.on('click', lambda: self.show_aerobic_efficiency_info())
                         ui.label('Running efficiency vs. cardiovascular drift over time').classes('text-sm text-zinc-400 mb-4')
                         
                         # Calculate consistency text for EF
@@ -5316,8 +6687,7 @@ Activity Breakdown: {activity_breakdown}
                                         x_nums_dec = (self.df['date_obj'] - self.df['date_obj'].min()).dt.total_seconds()
                                         y_dec = self.df['decoupling']
                                         slope_dec, intercept_dec, r_value_dec, p_value_dec, std_err_dec = linregress(x_nums_dec, y_dec)
-                                        # Decoupling is already in % units, so just multiply by seconds in week
-                                        # slope is in percentage points per second
+                                        # Decoupling is in percentage points per second
                                         slope_dec_per_week = slope_dec * 604800
                                     except:
                                         slope_dec_per_week = 0
@@ -5337,6 +6707,7 @@ Activity Breakdown: {activity_breakdown}
                         # Chart with zoom binding
                         self.efficiency_chart = ui.plotly(efficiency_fig).classes('w-full')
                         self.efficiency_chart.on('plotly_relayout', self.handle_efficiency_zoom)
+                        self.efficiency_chart.on('plotly_click', self.handle_efficiency_click)
                 
                 # 3. Cadence Trend Card
                 cadence_fig = self.generate_cadence_trend_chart()
@@ -5344,16 +6715,19 @@ Activity Breakdown: {activity_breakdown}
                     # Calculate cadence verdict
                     cad_verdict, cad_color, cad_bg = self.calculate_cadence_verdict(self.df)
                     
-                    with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
+                    with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8 h-full flex flex-col justify-between').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
                         # Header with verdict badge
                         with ui.row().classes('w-full items-center gap-3 mb-1'):
                             ui.label('Running Mechanics').classes('text-xl font-bold text-white')
                             self.cadence_verdict_label = ui.label(f'{cad_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {cad_bg}').style(f'color: {cad_color};')
+                            form_info_icon = ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-lg transition-colors')
+                            form_info_icon.on('click', lambda: self.show_form_info())
                         ui.label('Cadence trend showing turnover consistency').classes('text-sm text-zinc-400 mb-4')
                         
                         # Chart with zoom binding
                         self.cadence_chart = ui.plotly(cadence_fig).classes('w-full')
                         self.cadence_chart.on('plotly_relayout', self.handle_cadence_zoom)
+                        self.cadence_chart.on('plotly_click', self.handle_cadence_click)
             else:
                 # If no data, show placeholder message
                 ui.label('No data available. Import activities to view trends.').classes(
@@ -5879,9 +7253,9 @@ TRAINING ZONES:
 
             # Scenario B: Selector Menu
             style_map = {
-                'HIGH QUALITY': ('text-emerald-400', 'bg-emerald-500/20', 'border-emerald-500/30'),
-                'STRUCTURAL': ('text-blue-400', 'bg-blue-500/20', 'border-blue-500/30'),
-                'BROKEN': ('text-red-400', 'bg-red-500/20', 'border-red-500/30')
+                'High Quality Miles': ('text-emerald-400', 'bg-emerald-500/20', 'border-emerald-500/30'),
+                'Structural Miles': ('text-blue-400', 'bg-blue-500/20', 'border-blue-500/30'),
+                'Broken Miles': ('text-red-400', 'bg-red-500/20', 'border-red-500/30')
             }
             txt_col, bg_col, border_col = style_map.get(category_raw, ('text-zinc-400', 'bg-zinc-800', 'border-zinc-700'))
             category_label = category_raw.replace('_', ' ').title()
@@ -5949,108 +7323,213 @@ TRAINING ZONES:
         except Exception as ex:
             print(f"Click Error: {ex}")
 
+    async def handle_efficiency_click(self, e):
+        """Handle click on Efficiency/Cadence scatter data point → open activity detail modal.
+        
+        The multi-subplot chart has two trace types:
+        - Efficiency traces: customdata has 12 items, hash at index 11
+        - Cadence trace: customdata has 3 items, hash at index 2
+        Note: Trendline/shading traces may have scalar customdata (float) — skip those.
+        """
+        try:
+            point_data = e.args['points'][0]
+            custom_data = point_data.get('customdata')
+            if custom_data is None or not isinstance(custom_data, (list, tuple)):
+                return
+            
+            activity_hash = None
+            if len(custom_data) >= 2 and isinstance(custom_data[1], str):
+             # Efficiency scatter trace: [decoupling, filename] -> filename at index 1
+                activity_hash = custom_data[1]
+            elif len(custom_data) >= 12:
+                # Legacy/Other scatter trace (hash at index 11)
+                activity_hash = custom_data[11]
+            elif len(custom_data) >= 3:
+                # Cadence subplot trace (hash at index 2)
+                activity_hash = custom_data[2]
+            
+            if activity_hash and isinstance(activity_hash, str):
+                await self.open_activity_detail_modal(activity_hash, from_feed=True)
+        except Exception as ex:
+            print(f"Efficiency Click Error: {ex}")
+
+    async def handle_cadence_click(self, e):
+        """Handle click on Cadence/Mechanics scatter data point → open activity detail modal."""
+        try:
+            point_data = e.args['points'][0]
+            custom_data = point_data.get('customdata')
+            if custom_data is None or not isinstance(custom_data, (list, tuple)) or len(custom_data) < 4:
+                return
+            activity_hash = custom_data[3]
+            if activity_hash and isinstance(activity_hash, str):
+                await self.open_activity_detail_modal(activity_hash, from_feed=True)
+        except Exception as ex:
+            print(f"Cadence Click Error: {ex}")
+
     async def copy_to_llm(self):
         """
-        Copy activity data to clipboard with LLM context.
+        Copy detailed activity data to clipboard with LLM context.
         
-        Uses run.io_bound to keep WebSocket alive during heavy FIT parsing.
-        
-        Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 13.6
+        Upgrade: Uses "Cinematic Glass" Progress Modal + Sequential Processing.
         """
         # Check if we have data
         if not self.activities_data:
             ui.notify('No data to copy', type='warning')
             return
-        
-        # Show loading dialog immediately (client is alive)
-        self.copy_loading_dialog.open()
-        await asyncio.sleep(0.05)  # Let dialog render
+            
+        # --- UI: Cinematic Glass Modal ---
+        with ui.dialog() as progress_dialog, ui.card().classes(
+            'bg-zinc-900/95 backdrop-blur-xl border border-white/10 rounded-2xl '
+            'shadow-2xl shadow-emerald-500/20 min-w-[360px] p-6 items-start'
+        ):
+            with ui.column().classes('w-full gap-4'):
+                # Header
+                ui.label('Constructing Analysis...').classes('text-white font-medium tracking-wide text-lg')
+                
+                # Progress Bar (The Pill)
+                with ui.element('div').classes('w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden'):
+                    progress_bar = ui.element('div').classes(
+                        'h-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-300'
+                    ).style('width: 0%')
+                
+                # Status Label
+                status_label = ui.label('Initializing...').classes('font-mono text-xs text-zinc-400')
+                
+        progress_dialog.open()
+        await asyncio.sleep(0.1) # Let UI render
         
         try:
-            # Check if more than 20 activities (summary mode)
-            if len(self.activities_data) > 20:
-                # Summary mode: group by month and aggregate
-                self.df['month'] = pd.to_datetime(self.df['date']).dt.to_period('M')
-                monthly = self.df.groupby('month').agg({
-                    'distance_mi': 'sum',
-                    'efficiency_factor': 'mean',
-                    'decoupling': 'mean',
-                    'avg_cadence': 'mean',
-                    'filename': 'count'
-                }).round(2)
-                
-                # Format monthly summary
-                report_text = "=== MONTHLY TRAINING SUMMARY ===\n\n"
-                for month, row in monthly.iterrows():
-                    report_text += f"{month}:\n"
-                    report_text += f"  Runs: {row['filename']}\n"
-                    report_text += f"  Total Distance: {row['distance_mi']:.1f} mi\n"
-                    report_text += f"  Avg EF: {row['efficiency_factor']:.2f}\n"
-                    report_text += f"  Avg Decoupling: {row['decoupling']:.1f}%\n"
-                    report_text += f"  Avg Cadence: {row['avg_cadence']:.0f} spm\n\n"
-            else:
-                # Detailed mode: Parse FIT files using run.cpu_bound (keeps WebSocket alive!)
-                avg_ef = self.df['efficiency_factor'].mean() if self.df is not None else 0
-                
-                # Sort activities by date
-                sorted_activities = sorted(self.activities_data, 
-                                          key=lambda x: x.get('date', ''), 
-                                          reverse=True)
-                
-                # Prepare file paths for parsing
-                activity_info = []
-                for activity in sorted_activities:
-                    activity_hash = activity.get('db_hash')
-                    if activity_hash:
-                        db_activity = self.db.get_activity_by_hash(activity_hash)
-                        if db_activity:
-                            fit_file_path = self._locate_fit_file(db_activity)
-                            if fit_file_path:
-                                activity_info.append({
-                                    'path': fit_file_path,
-                                    'activity': activity
-                                })
-                
-                # Run heavy parsing in separate thread (WebSocket stays alive!)
-                lap_splits_list = await run.io_bound(
-                    _parse_fit_files_for_clipboard,
-                    activity_info
-                )
-                
-                # Build report with lap splits (client context is STILL alive!)
-                report_lines = []
-                for activity, lap_splits in zip(sorted_activities, lap_splits_list):
-                    # Add activity summary
-                    report_lines.append(self.format_run_data(activity, avg_ef))
-                    
-                    # Add lap splits if available
-                    if lap_splits:
-                        report_lines.append("\n[LAP SPLITS]")
-                        for lap in lap_splits:
-                            lap_num = lap.get('lap_number', 0)
-                            distance_mi = lap.get('distance', 0) * 0.000621371
-                            pace = lap.get('actual_pace', '--:--')
-                            hr = int(lap['avg_hr']) if lap.get('avg_hr') else '--'
-                            # Cadence: double it (Garmin stores one-foot cadence), handle None
-                            raw_cadence = lap.get('avg_cadence')
-                            if raw_cadence and raw_cadence > 0:
-                                cadence = int(raw_cadence * 2)
-                            else:
-                                cadence = '--'
-                            elev_ft = lap.get('total_ascent', 0) * 3.28084 if lap.get('total_ascent') else 0
-                            
-                            report_lines.append(
-                                f"{lap_num} | {distance_mi:.2f}mi | {pace}/mi | {hr}bpm | {cadence}spm | +{int(elev_ft)}ft"
-                            )
-                        report_lines.append("")
-                    
-                    report_lines.append('=' * 50)
-                
-                report_text = '\n'.join(report_lines)
+            # --- 1. PREPARE ACTIVITIES ---
+            # Sort by date (Newest First)
+            sorted_activities = sorted(self.activities_data, 
+                                      key=lambda x: x.get('date', ''), 
+                                      reverse=True)
             
-            # Append LLM context dictionary
-            llm_context = """
+            # Prepare list of metadata for loop
+            files_to_process = []
+            for activity in sorted_activities:
+                activity_hash = activity.get('db_hash')
+                if activity_hash:
+                    db_activity = self.db.get_activity_by_hash(activity_hash)
+                    if db_activity:
+                        fit_file_path = self._locate_fit_file(db_activity)
+                        if fit_file_path:
+                            files_to_process.append({
+                                'path': fit_file_path,
+                                'activity': activity
+                            })
+            
+            total_files = len(files_to_process)
+            lap_splits_list = []
+            
+            # --- 2. SEQUENTIAL PROCESSING LOOP ---
+            for i, info in enumerate(files_to_process):
+                # Update UI
+                count = i + 1
+                percent = int((count / total_files) * 100)
+                progress_bar.style(f'width: {percent}%')
+                status_label.set_text(f"Parsing activity {count} of {total_files}...")
+                
+                # Process Single File (Background Thread)
+                # Ensure we pass a LIST to match the function signature
+                batch_result = await run.io_bound(_parse_fit_files_for_clipboard, [info])
+                
+                # Result is a list of lists (because we sent a batch of 1)
+                # So we take the first item
+                if batch_result:
+                    lap_splits_list.append(batch_result[0])
+                else:
+                    lap_splits_list.append(None)
+            
+            # --- 3. BUILD REPORT TEXT ---
+            status_label.set_text("Formatting report...")
+            await asyncio.sleep(0.05)
+            
+            report_lines = []
+            
+            # We need to match activities to results. 
+            # Note: files_to_process might be smaller than sorted_activities if some files were missing.
+            # But here we iterate strictly over what we processed.
+            for info, lap_splits in zip(files_to_process, lap_splits_list):
+                activity = info['activity']
+                
+                # Extract Standard Metrics
+                date = activity.get('date', '')
+                time_str = activity.get('time', '')
+                icon = activity.get('context_emoji', '🏃')
+                context = activity.get('context_name', 'Run')
+                dist = activity.get('distance_mi', 0)
+                pace = activity.get('pace', '--:--')
+                elev = activity.get('elevation_ft', 0)
+                
+                # Physiology Metrics
+                avg_hr = activity.get('avg_hr', '--')
+                max_hr = activity.get('max_hr', '--')
+                power = activity.get('avg_power', '--')
+                ef = activity.get('efficiency_factor', 0)
+                decoupling = activity.get('decoupling', 0)
+                
+                # Decoupling Label Logic
+                if decoupling < 5: dec_label = "Excellent"
+                elif decoupling < 10: dec_label = "⚠️ Moderate"
+                else: dec_label = "🛑 High Fatigue"
+                
+                # HRR Logic
+                hrr_list = activity.get('hrr_list', [])
+                hrr_str = "--"
+                if hrr_list and len(hrr_list) > 0:
+                    hrr_str = f"{hrr_list[0]}bpm (1min)"
+                
+                te_aerobic = activity.get('aerobic_te', '--')
+                te_anaerobic = activity.get('anaerobic_te', '--')
+                
+                # Mechanics Logic
+                cadence = activity.get('avg_cadence', '--')
+                form_tag = "[✅ ELITE FORM]" if (cadence != '--' and int(cadence) > 170) else "[👍 GOOD FORM]"
+                
+                # --- FORMAT THE BLOCK ---
+                block = f"""
+RUN: {date} {time_str}
+Type:        [{icon} {context}]
+--------------------------------------------------
+SUMMARY
+Dist:        {dist:.2f} mi
+Pace:        {pace} /mi
+Elev Gain:   +{elev} ft
 
+PHYSIOLOGY (The Engine)
+Avg HR:      {avg_hr} bpm
+Max HR:      {max_hr} bpm
+Avg Power:   {power}W
+EF:          {ef:.2f} (Efficiency Factor)
+Decoupling:  {decoupling:.2f}% ({dec_label})
+HRR:         {hrr_str}
+Training Effect: {te_aerobic} Aerobic, {te_anaerobic} Anaerobic
+
+MECHANICS (The Chassis)
+Avg Cadence: {cadence} spm
+Form Tag:    {form_tag}
+
+[LAP SPLITS]"""
+                report_lines.append(block)
+                
+                # Add Splits
+                if lap_splits:
+                    for lap in lap_splits:
+                        l_num = lap.get('lap_number', 0)
+                        l_dist = lap.get('distance', 0) * 0.000621371
+                        l_pace = lap.get('actual_pace', '--:--')
+                        l_hr = int(lap['avg_hr']) if lap.get('avg_hr') else '--'
+                        raw_cad = lap.get('avg_cadence')
+                        l_cad = int(raw_cad * 2) if raw_cad else '--'
+                        l_elev = lap.get('total_ascent', 0) * 3.28084 if lap.get('total_ascent') else 0
+                        
+                        report_lines.append(f"{l_num} | {l_dist:.2f}mi | {l_pace}/mi | {l_hr}bpm | {l_cad}spm | +{int(l_elev)}ft")
+                
+                report_lines.append("\\n" + "="*50 + "\\n")
+            
+            # --- 4. ADD CONTEXT & COPY ---
+            llm_context = """
 === CONTEXT FOR AI COACHING ===
 
 I'm sharing my running data for analysis. Please help me understand:
@@ -6089,40 +7568,20 @@ FORM METRICS:
 - Vertical Ratio: Lower = less wasted vertical motion
 - GCT Balance: Target 50/50 left/right symmetry
 """
+            full_content = "\\n".join(report_lines) + llm_context
             
-            # Combine report and context
-            clipboard_content = report_text + llm_context
+            import pyperclip
+            pyperclip.copy(full_content)
             
-            # Copy to clipboard (client context is STILL alive!)
-            try:
-                import pyperclip
-                pyperclip.copy(clipboard_content)
-                
-                # Close loading dialog (safe now!)
-                self.copy_loading_dialog.close()
-                
-                # Show success notification with modern styling
-                ui.notify(
-                    '✅ Data copied to clipboard!', 
-                    type='positive',
-                    position='top',
-                    close_button=True
-                )
-                
-                print("✅ Data successfully copied to clipboard!")
-                
-            except ImportError:
-                self.copy_loading_dialog.close()
-                ui.notify('Please install pyperclip: pip3 install pyperclip', type='negative')
-                print("❌ Error: pyperclip not installed. Run: pip3 install pyperclip")
+            ui.notify('✅ Analysis Data Copied!', type='positive', close_button=True)
             
         except Exception as e:
-            # Close loading dialog on error
-            self.copy_loading_dialog.close()
             ui.notify(f'Error: {str(e)}', type='negative')
             print(f"❌ Error copying to clipboard: {str(e)}")
             import traceback
             traceback.print_exc()
+        finally:
+            progress_dialog.close()
 
 
 # --- STANDALONE FUNCTION FOR IO-BOUND PARSING ---
@@ -6292,6 +7751,10 @@ def _parse_fit_files_for_clipboard(activity_info_list):
 
 def main():
     """Application entry point."""
+    # Suppress known NiceGUI framework listener-churn warning noise
+    nicegui_logger = logging.getLogger('nicegui')
+    nicegui_logger.addFilter(MuteFrameworkNoise())
+
     # Instantiate the application
     app = GarminAnalyzerApp()
     

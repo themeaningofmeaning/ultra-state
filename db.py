@@ -100,6 +100,46 @@ class DatabaseManager:
                 file_path
             ))
 
+    def update_activity_map_payload(self, file_hash, map_payload, route_segments=None, bounds=None, map_payload_version=None):
+        """Patch map payload fields inside json_data for an existing activity row."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT json_data FROM activities WHERE hash = ?",
+                (file_hash,),
+            ).fetchone()
+            if not row:
+                return False
+
+            try:
+                activity_data = json.loads(row[0]) if row[0] else {}
+            except Exception:
+                activity_data = {}
+
+            activity_data['map_payload'] = map_payload or {}
+
+            if map_payload_version is None:
+                if isinstance(map_payload, dict):
+                    map_payload_version = map_payload.get('v', 1)
+                else:
+                    map_payload_version = 1
+            activity_data['map_payload_version'] = int(map_payload_version)
+
+            if route_segments is not None:
+                activity_data['route_segments'] = route_segments
+            elif isinstance(map_payload, dict) and 'segments' in map_payload:
+                activity_data['route_segments'] = map_payload.get('segments', [])
+
+            if bounds is not None:
+                activity_data['bounds'] = bounds
+            elif isinstance(map_payload, dict) and 'bounds' in map_payload:
+                activity_data['bounds'] = map_payload.get('bounds', [[0, 0], [0, 0]])
+
+            conn.execute(
+                "UPDATE activities SET json_data = ? WHERE hash = ?",
+                (json.dumps(activity_data, default=str), file_hash),
+            )
+            return True
+
     def activity_exists(self, file_hash):
         with self.get_connection() as conn:
             cursor = conn.execute("SELECT 1 FROM activities WHERE hash = ?", (file_hash,))
