@@ -20,8 +20,17 @@ from plotly.subplots import make_subplots
 from nicegui import ui, run
 
 # Local imports
-from analyzer import FitAnalyzer, analyze_form, classify_split
+from analyzer import FitAnalyzer, analyze_form, classify_split, build_map_payload_from_streams
 from db import DatabaseManager, calculate_file_hash
+from hr_zones import (
+    HR_ZONE_COLORS,
+    HR_ZONE_DESCRIPTIONS,
+    HR_ZONE_MAP_LEGEND_GRADIENT,
+    HR_ZONE_ORDER,
+    HR_ZONE_RANGE_LABELS,
+    classify_hr_zone,
+    classify_hr_zone_by_ratio,
+)
 
 
 class MuteFrameworkNoise(logging.Filter):
@@ -30,7 +39,7 @@ class MuteFrameworkNoise(logging.Filter):
         return "Event listeners changed after initial definition" not in record.getMessage()
 
 
-MAP_PAYLOAD_VERSION = 4
+MAP_PAYLOAD_VERSION = 5
 
 
 # --- MAIN APPLICATION CLASS ---
@@ -85,7 +94,7 @@ class GarminAnalyzerApp:
         # LRU-ish cache for parsed activity detail payloads (avoids reparsing FIT on reopen)
         self.activity_detail_cache = {}
         self.activity_detail_cache_size = 24
-        self.activity_detail_cache_version = 2
+        self.activity_detail_cache_version = 3
 
         # Background backfill task for legacy map payloads
         self._map_backfill_task = None
@@ -375,12 +384,15 @@ class GarminAnalyzerApp:
         if not isinstance(map_payload, dict):
             return True
         version = int(activity.get('map_payload_version') or map_payload.get('v') or 1)
+        segments = map_payload.get('segments')
+        bounds = self._normalize_bounds(map_payload.get('bounds'))
+        if not isinstance(segments, list) or not segments:
+            return True
+        if not bounds:
+            return True
+        # v5 relies on FIT-stream-aware regeneration; do not "upgrade" v4 payloads from legacy segments.
         if version < MAP_PAYLOAD_VERSION:
-            return True
-        if not isinstance(map_payload.get('segments'), list) or not map_payload.get('segments'):
-            return True
-        if not self._normalize_bounds(map_payload.get('bounds')):
-            return True
+            return version < 4
         return False
 
     def _get_or_backfill_map_payload(self, activity):
@@ -393,11 +405,15 @@ class GarminAnalyzerApp:
             bounds = self._normalize_bounds(map_payload.get('bounds'))
             segments = map_payload.get('segments')
             version = int(activity.get('map_payload_version') or map_payload.get('v') or 1)
-            if version >= MAP_PAYLOAD_VERSION and bounds and isinstance(segments, list) and segments:
+            if bounds and isinstance(segments, list) and segments:
                 map_payload['bounds'] = bounds
                 activity['map_payload'] = map_payload
                 activity['map_payload_version'] = version
-                return map_payload
+                if version >= MAP_PAYLOAD_VERSION:
+                    return map_payload
+                if version >= 4:
+                    # Keep valid v4 payloads until we can rebuild from source FIT streams.
+                    return map_payload
 
         legacy_segments = activity.get('route_segments')
         if (not legacy_segments) and isinstance(map_payload, dict):
@@ -511,8 +527,12 @@ class GarminAnalyzerApp:
                 vertical_ratio = []
                 step_length = [] # aka stride_length
                 
-                # (Route extraction removed - using pre-calculated DB data)
-                # ---------------------------------------------------------
+                # Route streams (used for deterministic map payload regeneration when needed)
+                route_lats = []
+                route_lons = []
+                route_speeds = []
+                route_hrs = []
+                route_timestamps = []
 
                 for record in fitfile.get_messages("record"):
                     vals = record.get_values()
@@ -541,9 +561,33 @@ class GarminAnalyzerApp:
                     stance_time.append(vals.get('stance_time') or vals.get('ground_contact_time'))
                     vertical_ratio.append(vals.get('vertical_ratio'))
                     step_length.append(vals.get('step_length') or vals.get('stride_length'))
-                    
-                    # (Route point extraction removed)
-                    # -----------------------------------------------------
+
+                    # Route extraction with robust semicircle conversion and 0,0 filtering
+                    lat_raw = vals.get('position_lat')
+                    lon_raw = vals.get('position_long')
+                    if lat_raw is not None and lon_raw is not None:
+                        try:
+                            lat_raw = float(lat_raw)
+                            lon_raw = float(lon_raw)
+                            if abs(lat_raw) > 180 or abs(lon_raw) > 180:
+                                point_lat = lat_raw * (180 / 2**31)
+                                point_lon = lon_raw * (180 / 2**31)
+                            else:
+                                point_lat = lat_raw
+                                point_lon = lon_raw
+
+                            if (
+                                -90 <= point_lat <= 90
+                                and -180 <= point_lon <= 180
+                                and not (abs(point_lat) < 1e-6 and abs(point_lon) < 1e-6)
+                            ):
+                                route_lats.append(point_lat)
+                                route_lons.append(point_lon)
+                                route_speeds.append(vals.get('enhanced_speed') or vals.get('speed') or 0)
+                                route_hrs.append(vals.get('heart_rate'))
+                                route_timestamps.append(ts)
+                        except (TypeError, ValueError):
+                            pass
 
                 # 5. Extract lap data
                 lap_data = []
@@ -619,11 +663,12 @@ class GarminAnalyzerApp:
                     'stance_time': stance_time,
                     'vertical_ratio': vertical_ratio,
                     'step_length': step_length,
-                    'step_length': step_length,
-                    # --- NEW: Route Data with Speed ---
-                    # ----------------------------------
-                    # ----------------------------------
-                    # ----------------------------------
+                    # Route streams for map payload regeneration
+                    'route_lats': route_lats,
+                    'route_lons': route_lons,
+                    'route_speeds': route_speeds,
+                    'route_hrs': route_hrs,
+                    'route_timestamps': route_timestamps,
                 }
 
             # Run parsing in background thread
@@ -645,6 +690,54 @@ class GarminAnalyzerApp:
                 result['max_hr_fallback'] = False
 
             result['max_hr'] = max_hr
+
+            current_payload = activity.get('map_payload')
+            current_version = int(
+                activity.get('map_payload_version')
+                or (current_payload.get('v') if isinstance(current_payload, dict) else 1)
+                or 1
+            )
+            current_bounds = self._normalize_bounds(
+                current_payload.get('bounds') if isinstance(current_payload, dict) else None
+            )
+            current_segments = current_payload.get('segments') if isinstance(current_payload, dict) else None
+            needs_payload_refresh = (
+                current_version < MAP_PAYLOAD_VERSION
+                or not current_bounds
+                or not isinstance(current_segments, list)
+                or not current_segments
+            )
+
+            if needs_payload_refresh and len(result.get('route_lats', [])) >= 2:
+                refreshed_payload = build_map_payload_from_streams(
+                    result.get('route_lats'),
+                    result.get('route_lons'),
+                    result.get('route_speeds'),
+                    hr_stream=result.get('route_hrs'),
+                    max_hr=max_hr,
+                    timestamps=result.get('route_timestamps'),
+                    target_segments=700,
+                )
+                if isinstance(refreshed_payload, dict) and refreshed_payload.get('segments'):
+                    activity['map_payload'] = refreshed_payload
+                    activity['map_payload_version'] = refreshed_payload.get('v', MAP_PAYLOAD_VERSION)
+                    activity['route_segments'] = refreshed_payload.get('segments', [])
+                    activity['bounds'] = refreshed_payload.get('bounds', [[0, 0], [0, 0]])
+                    try:
+                        self.db.update_activity_map_payload(
+                            activity_hash,
+                            refreshed_payload,
+                            route_segments=refreshed_payload.get('segments'),
+                            bounds=refreshed_payload.get('bounds'),
+                            map_payload_version=refreshed_payload.get('v', MAP_PAYLOAD_VERSION),
+                        )
+                    except Exception as ex:
+                        print(f"Map payload refresh warning for {activity_hash}: {ex}")
+
+            # Route streams are used only for map payload regeneration; keep cache payload compact.
+            for transient_key in ('route_lats', 'route_lons', 'route_speeds', 'route_hrs', 'route_timestamps'):
+                result.pop(transient_key, None)
+
             result['activity_metadata'] = activity
 
             # Save detail payload cache keyed by activity hash + file version
@@ -717,49 +810,18 @@ class GarminAnalyzerApp:
         # Filter out None values
         hr_stream = [hr for hr in hr_stream if hr is not None]
 
+        ordered_labels = [HR_ZONE_RANGE_LABELS[zone] for zone in HR_ZONE_ORDER]
         if not hr_stream:
-            return {
-                'Zone 1 (<60%)': 0,
-                'Zone 2 (60-70%)': 0,
-                'Zone 3 (70-80%)': 0,
-                'Zone 4 (80-90%)': 0,
-                'Zone 5 (>90%)': 0
-            }
+            return {label: 0 for label in ordered_labels}
 
-        # Calculate zone boundaries
-        z1_max = max_hr * 0.60
-        z2_max = max_hr * 0.70
-        z3_max = max_hr * 0.80
-        z4_max = max_hr * 0.90
-
-        # Count seconds in each zone
-        zone_counts = {
-            'Zone 1 (<60%)': 0,
-            'Zone 2 (60-70%)': 0,
-            'Zone 3 (70-80%)': 0,
-            'Zone 4 (80-90%)': 0,
-            'Zone 5 (>90%)': 0
-        }
-
+        zone_counts = {zone: 0 for zone in HR_ZONE_ORDER}
         for hr in hr_stream:
-            if hr < z1_max:
-                zone_counts['Zone 1 (<60%)'] += 1
-            elif hr < z2_max:
-                zone_counts['Zone 2 (60-70%)'] += 1
-            elif hr < z3_max:
-                zone_counts['Zone 3 (70-80%)'] += 1
-            elif hr < z4_max:
-                zone_counts['Zone 4 (80-90%)'] += 1
-            else:
-                zone_counts['Zone 5 (>90%)'] += 1
+            zone_counts[classify_hr_zone(hr, max_hr)] += 1
 
-        # Convert seconds to minutes
-        zone_times = {
-            zone: count / 60.0
-            for zone, count in zone_counts.items()
+        return {
+            HR_ZONE_RANGE_LABELS[zone]: zone_counts[zone] / 60.0
+            for zone in HR_ZONE_ORDER
         }
-
-        return zone_times
     
     def calculate_gap_for_laps(self, lap_data, elevation_stream, timestamps, cadence_stream=None, max_hr=185):
         """
@@ -1200,23 +1262,18 @@ class GarminAnalyzerApp:
         """
         import plotly.graph_objects as go
 
-        # Define color palette (unified with trends HR Zones lens)
-        colors = [
-            '#60a5fa',  # Zone 1 - Blue (easy/warmup)
-            '#34d399',  # Zone 2 - Emerald (aerobic base)
-            '#fbbf24',  # Zone 3 - Amber (threshold/gray zone)
-            '#f97316',  # Zone 4 - Orange (hard)
-            '#ef4444'   # Zone 5 - Red (max effort)
-        ]
+        y_labels = [HR_ZONE_RANGE_LABELS[zone] for zone in HR_ZONE_ORDER]
+        x_values = [zone_times.get(label, 0) for label in y_labels]
+        colors = [HR_ZONE_COLORS[zone] for zone in HR_ZONE_ORDER]
 
         # Create horizontal bar chart
         fig = go.Figure(data=[
             go.Bar(
-                y=list(zone_times.keys()),
-                x=list(zone_times.values()),
+                y=y_labels,
+                x=x_values,
                 orientation='h',
                 marker=dict(color=colors),
-                text=[f"{t:.1f} min" for t in zone_times.values()],
+                text=[f"{t:.1f} min" for t in x_values],
                 textposition='auto',
                 hoverinfo='none'  # Disable hover tooltips
             )
@@ -2189,10 +2246,10 @@ class GarminAnalyzerApp:
                             map_color_mode = {'value': 'pace'}
                             map_route_palette = {
                                 'pace': 'linear-gradient(to right, #0000ff, #00ff00, #ffff00, #ffa500, #ff0000)',
-                                'hr': 'linear-gradient(to right, #3b82f6, #10b981, #f97316, #ef4444)',
+                                'hr': HR_ZONE_MAP_LEGEND_GRADIENT,
                             }
-                            map_legend_left = {'pace': 'Slower', 'hr': 'Lower HR'}
-                            map_legend_right = {'pace': 'Faster', 'hr': 'Higher HR'}
+                            map_legend_left = {'pace': 'Slower', 'hr': 'Zone 1'}
+                            map_legend_right = {'pace': 'Faster', 'hr': 'Zone 5'}
                             route_weight = 4
 
                             def _segment_color(seg, mode):
@@ -2510,24 +2567,56 @@ class GarminAnalyzerApp:
 
         if modal_map and modal_fit_bounds:
             fit_options = {'padding': [26, 26], 'maxZoom': 18, 'animate': False}
+            
+            def _bounds_contains(actual_bounds, target_bounds, tolerance=0.00002):
+                if not actual_bounds or not target_bounds:
+                    return False
+                return (
+                    actual_bounds[0][0] <= (target_bounds[0][0] + tolerance)
+                    and actual_bounds[0][1] <= (target_bounds[0][1] + tolerance)
+                    and actual_bounds[1][0] >= (target_bounds[1][0] - tolerance)
+                    and actual_bounds[1][1] >= (target_bounds[1][1] - tolerance)
+                )
 
-            def _stabilize_and_fit():
+            async def _read_current_map_bounds(_map):
                 try:
+                    bounds_expr = (
+                        "((map) => {"
+                        "const b = map.getBounds();"
+                        "return [[b.getSouthWest().lat, b.getSouthWest().lng], "
+                        "[b.getNorthEast().lat, b.getNorthEast().lng], map.getZoom()];"
+                        "})"
+                    )
+                    raw = await _map.run_map_method(f':{bounds_expr}')
+                    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+                        return self._normalize_bounds(raw[:2]), (raw[2] if len(raw) >= 3 else None)
+                except Exception as ex:
+                    print(f"Map bounds read warning: {ex}")
+                return None, None
+
+            async def _fit_modal_map_deterministic():
+                try:
+                    await modal_map.initialized()
+                    await asyncio.sleep(0)
                     modal_map.run_map_method('invalidateSize')
                     modal_map.run_map_method('fitBounds', modal_fit_bounds, fit_options)
+
+                    await asyncio.sleep(0.08)
+                    current_bounds, _ = await _read_current_map_bounds(modal_map)
+                    if not _bounds_contains(current_bounds, modal_fit_bounds):
+                        modal_map.run_map_method('invalidateSize')
+                        modal_map.run_map_method('fitBounds', modal_fit_bounds, fit_options)
+                        await asyncio.sleep(0.08)
+                        current_bounds, _ = await _read_current_map_bounds(modal_map)
+                        if not _bounds_contains(current_bounds, modal_fit_bounds):
+                            print("Map fitBounds verification warning: bounds still off after retry.")
                 except Exception as ex:
-                    print(f"Map fitBounds retry failed: {ex}")
+                    print(f"Map fit lifecycle error: {ex}")
+                finally:
+                    if modal_map_card:
+                        modal_map_card.style('opacity: 1; transition: opacity 0.18s ease;')
 
-            def _finalize_map_open():
-                _stabilize_and_fit()
-                if modal_map_card:
-                    modal_map_card.style('opacity: 1; transition: opacity 0.18s ease;')
-
-            # Two-pass strategy for smooth first paint:
-            # 1) fit while map is still transparent
-            # 2) refit after dialog settles, then fade in
-            ui.timer(0.02, _stabilize_and_fit, once=True)
-            ui.timer(0.08, _finalize_map_open, once=True)
+            asyncio.create_task(_fit_modal_map_deterministic())
 
  
     def build_ui(self):
@@ -5628,16 +5717,7 @@ Activity Breakdown: {activity_breakdown}
             
             # Classify into HR zone based on avg_hr / max_hr ratio
             ratio = avg_hr / max_hr
-            if ratio < 0.60:
-                zone = 'Zone 1'
-            elif ratio < 0.70:
-                zone = 'Zone 2'
-            elif ratio < 0.80:
-                zone = 'Zone 3'
-            elif ratio < 0.90:
-                zone = 'Zone 4'
-            else:
-                zone = 'Zone 5'
+            zone = classify_hr_zone_by_ratio(ratio)
             
             zone_data.append({
                 'week_start': week_start, 'minutes': moving_time, 'zone': zone,
@@ -5649,22 +5729,10 @@ Activity Breakdown: {activity_breakdown}
         
         df_zones = pd.DataFrame(zone_data)
         
-        # Unified HR zone color palette (consistent across modal + trends)
-        categories = ['Zone 1', 'Zone 2', 'Zone 3', 'Zone 4', 'Zone 5']
-        colors = {
-            'Zone 1': '#60a5fa',  # Blue — easy/warmup
-            'Zone 2': '#34d399',  # Emerald — aerobic base
-            'Zone 3': '#64748b',  # Slate — garbage miles/gray zone 🌫️
-            'Zone 4': '#f97316',  # Orange — hard
-            'Zone 5': '#ef4444',  # Red — max effort
-        }
-        descriptions = {
-            'Zone 1': 'Easy (<60% max HR)',
-            'Zone 2': 'Aerobic (60-70% max HR)',
-            'Zone 3': 'The Grey Zone (70-80% max HR)',
-            'Zone 4': 'Hard (80-90% max HR)',
-            'Zone 5': 'Max effort (>90% max HR)',
-        }
+        # Unified HR zone palette and labels (shared with modal map + charts)
+        categories = list(HR_ZONE_ORDER)
+        colors = HR_ZONE_COLORS
+        descriptions = HR_ZONE_DESCRIPTIONS
         
         grouped = df_zones.groupby(['week_start', 'zone'])
         weeks = sorted(df_zones['week_start'].unique())

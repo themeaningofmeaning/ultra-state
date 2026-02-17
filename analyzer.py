@@ -12,7 +12,10 @@ from typing import Optional, Dict, Any, List
 import os
 import math
 
-MAP_PAYLOAD_VERSION = 4
+from hr_zones import hr_color_for_value
+
+
+MAP_PAYLOAD_VERSION = 5
 
 def get_best_value(record, legacy_key, enhanced_key):
     val = record.get(enhanced_key) or record.get(legacy_key)
@@ -127,55 +130,8 @@ def _get_speed_color(speed_mps, min_speed, max_speed):
 
 
 def _get_hr_color(hr, max_hr):
-    """
-    Map heart rate to a 3-stage intensity gradient:
-    Blue (easy) -> Green (steady) -> Orange/Red (hard).
-    """
-    try:
-        hr = float(hr or 0)
-    except (TypeError, ValueError):
-        hr = 0.0
-
-    try:
-        max_hr = float(max_hr or 0)
-    except (TypeError, ValueError):
-        max_hr = 0.0
-
-    if hr <= 0:
-        return '#3b82f6'  # Fallback blue when HR is missing
-
-    if max_hr <= 0:
-        max_hr = 185.0
-
-    # Clamp realistic lower bound to avoid over-heating low-HR activities
-    min_hr = max(90.0, max_hr * 0.50)
-    if max_hr <= min_hr:
-        max_hr = min_hr + 1.0
-
-    t = (hr - min_hr) / (max_hr - min_hr)
-    t = max(0.0, min(1.0, t))
-
-    # Blue -> Green -> Orange -> Red
-    colors = [
-        (59, 130, 246),   # Blue-500
-        (16, 185, 129),   # Emerald-500
-        (249, 115, 22),   # Orange-500
-        (239, 68, 68),    # Red-500
-    ]
-
-    idx = int(t * (len(colors) - 1))
-    if idx >= len(colors) - 1:
-        idx = len(colors) - 2
-
-    c1 = colors[idx]
-    c2 = colors[idx + 1]
-    ratio = (t * (len(colors) - 1)) - idx
-
-    r = int(c1[0] + (c2[0] - c1[0]) * ratio)
-    g = int(c1[1] + (c2[1] - c1[1]) * ratio)
-    b = int(c1[2] + (c2[2] - c1[2]) * ratio)
-
-    return f'#{r:02x}{g:02x}{b:02x}'
+    """Map heart rate to canonical 5-zone colors."""
+    return hr_color_for_value(hr, max_hr)
 
 def _haversine_m(lat1, lon1, lat2, lon2):
     """Fast, robust distance estimate in meters for GPS jump filtering."""
@@ -194,7 +150,7 @@ def _downsample_route(lats, lons, speeds, hr_stream=None, max_hr=185, timestamps
 
     Returns payload:
     {
-      'v': 4,
+      'v': MAP_PAYLOAD_VERSION,
       'segments': [[lat1, lon1, lat2, lon2, speed_color, hr_color], ...],
       'bounds': [[min_lat, min_lon], [max_lat, max_lon]],
       'center': [lat, lon],
@@ -214,7 +170,7 @@ def _downsample_route(lats, lons, speeds, hr_stream=None, max_hr=185, timestamps
     if not lats or not lons:
         return empty_payload
 
-    usable_len = min(len(lats), len(lons), len(speeds) if speeds else len(lats), len(hr_stream) if hr_stream else len(lats))
+    usable_len = min(len(lats), len(lons), len(speeds) if speeds else len(lats))
     if usable_len < 2:
         return empty_payload
 
@@ -289,11 +245,15 @@ def _downsample_route(lats, lons, speeds, hr_stream=None, max_hr=185, timestamps
     else:
         smooth_speeds = clean_speeds
 
-    # Smooth HR color signal
-    if len(clean_hrs) >= 7:
-        window_hr = 11 if len(clean_hrs) >= 11 else (len(clean_hrs) // 2) * 2 + 1
-        kernel_hr = np.ones(window_hr, dtype=float) / window_hr
-        smooth_hrs = np.convolve(clean_hrs, kernel_hr, mode='same')
+    # Preserve peaks while filtering one-sample sensor spikes.
+    if len(clean_hrs) >= 5:
+        window_hr = 5
+        pad = window_hr // 2
+        padded = np.pad(clean_hrs, (pad, pad), mode='edge')
+        smooth_hrs = np.array(
+            [np.median(padded[i:i + window_hr]) for i in range(len(clean_hrs))],
+            dtype=float,
+        )
     else:
         smooth_hrs = clean_hrs
 
@@ -319,8 +279,8 @@ def _downsample_route(lats, lons, speeds, hr_stream=None, max_hr=185, timestamps
 
         hr_chunk = smooth_hrs[i:j + 1]
         valid_hr_chunk = hr_chunk[hr_chunk > 0]
-        avg_hr = float(np.mean(valid_hr_chunk)) if valid_hr_chunk.size else 0.0
-        hr_color = _get_hr_color(avg_hr, max_hr)
+        peak_hr = float(np.max(valid_hr_chunk)) if valid_hr_chunk.size else 0.0
+        hr_color = _get_hr_color(peak_hr, max_hr)
 
         segments.append([
             float(clean_lats[i]), float(clean_lons[i]),
@@ -333,7 +293,10 @@ def _downsample_route(lats, lons, speeds, hr_stream=None, max_hr=185, timestamps
     if segments and (segments[-1][2] != float(clean_lats[-1]) or segments[-1][3] != float(clean_lons[-1])):
         k = max(0, total_points - 2)
         speed_color = _get_speed_color(float(smooth_speeds[k]), min_speed, max_speed)
-        hr_color = _get_hr_color(float(smooth_hrs[k]) if len(smooth_hrs) > k else 0.0, max_hr)
+        tail_chunk = smooth_hrs[k:]
+        valid_tail_chunk = tail_chunk[tail_chunk > 0]
+        peak_tail_hr = float(np.max(valid_tail_chunk)) if valid_tail_chunk.size else 0.0
+        hr_color = _get_hr_color(peak_tail_hr, max_hr)
         segments.append([
             float(clean_lats[k]), float(clean_lons[k]),
             float(clean_lats[-1]), float(clean_lons[-1]),
@@ -365,6 +328,27 @@ def _downsample_route(lats, lons, speeds, hr_stream=None, max_hr=185, timestamps
         'segment_count': len(segments),
         'point_count': total_points,
     }
+
+
+def build_map_payload_from_streams(
+    lats,
+    lons,
+    speeds,
+    hr_stream=None,
+    max_hr=185,
+    timestamps=None,
+    target_segments=700,
+):
+    """Public wrapper for building map payloads from aligned FIT streams."""
+    return _downsample_route(
+        lats,
+        lons,
+        speeds,
+        hr_stream=hr_stream,
+        max_hr=max_hr,
+        timestamps=timestamps,
+        target_segments=target_segments,
+    )
 
 class FitAnalyzer:
     def __init__(self, output_callback=None, progress_callback=None):
@@ -426,6 +410,7 @@ class FitAnalyzer:
         route_lats = []
         route_lons = []
         route_speeds = []
+        route_hrs = []
         
         # --- NEW: Extract Session & Profile Metadata (Safe Mode) ---
         session_max_speed = 0.0
@@ -507,6 +492,7 @@ class FitAnalyzer:
         route_lats = []
         route_lons = []
         route_speeds = []
+        route_hrs = []
         route_timestamps = []
 
         for record in fitfile.get_messages("record"):
@@ -533,6 +519,7 @@ class FitAnalyzer:
                 # Use enhanced_speed or speed, default to 0
                 s = get_best_value(r, 'speed', 'enhanced_speed') or 0
                 route_speeds.append(s)
+                route_hrs.append(r.get('heart_rate'))
                 route_timestamps.append(r.get('timestamp'))
             # -----------------------------
 
@@ -561,7 +548,6 @@ class FitAnalyzer:
             data.append(point)
 
         # --- MAP PROCESSING (Versioned import-time payload) ---
-        route_hrs = [d.get('hr') for d in data]
         map_payload = _downsample_route(
             route_lats,
             route_lons,
