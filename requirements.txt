@@ -10,6 +10,7 @@ plotly>=5.0.0           # Interactive Graphs (Native support in NiceGUI)
 kaleido>=0.2.1          # Static image export for Plotly
 Pillow>=9.0.0           # Image processing for chart export
 pyperclip>=1.8.0        # Clipboard access for native mode
+watchdog>=4.0.0         # Filesystem event watcher for low-latency auto-sync
 
 # --- PACKAGING ---
 pyinstaller>=6.0.0      # To build the .app/.exe

@@ -129,7 +129,7 @@ class GarminAnalyzerApp:
         # Initial render pass.
         ui.timer(0.1, self.refresh_data_view, once=True)
         ui.timer(0.25, self.refresh_library_widget_status, once=True)
-        ui.timer(5.0, self.refresh_library_widget_status)
+        ui.timer(1.0, self.refresh_library_widget_status)
         
         # Show Save Chart button initially with fade (Trends tab is default)
         ui.timer(0.05, lambda: self.save_chart_btn.style('opacity: 1; pointer-events: auto;'), once=True)
@@ -3233,6 +3233,16 @@ class GarminAnalyzerApp:
         return f'{age_sec // 86400}d ago'
 
     @staticmethod
+    def _sync_age_seconds(finished_at):
+        if not finished_at:
+            return None
+        try:
+            parsed = datetime.fromisoformat(finished_at.replace('Z', '+00:00'))
+            return max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+        except Exception:
+            return None
+
+    @staticmethod
     def _sync_report_key(report):
         if not report:
             return None
@@ -3268,7 +3278,7 @@ class GarminAnalyzerApp:
                 status_line = 'Status: Sync error'
             elif report and report.finished_at:
                 age = self._format_sync_age(report.finished_at)
-                age_suffix = '' if age == 'just now' else f' {age}'
+                age_suffix = ' just now' if age == 'just now' else f' {age}'
                 status_line = f'Status: Synced{age_suffix}'
             elif has_root:
                 status_line = 'Status: Ready'
@@ -3279,12 +3289,13 @@ class GarminAnalyzerApp:
             elif status_name == 'error':
                 row_subtitle = 'Sync error'
             elif report and report.finished_at:
-                # Re-calc age/suffix or reuse if unchanged (simpler to re-calc local vars or reuse logic)
-                # reusing locals from above block if safe, but python scoping allows it.
-                # safer to re-assign or just duplicate logic for clarity in this snippet.
                 age = self._format_sync_age(report.finished_at)
-                age_suffix = '' if age == 'just now' else f' {age}'
-                row_subtitle = f'Synced{age_suffix}'
+                age_seconds = self._sync_age_seconds(report.finished_at)
+                if report.imported_new > 0 and age_seconds is not None and age_seconds <= 20:
+                    row_subtitle = f'+{report.imported_new} new'
+                else:
+                    age_suffix = ' now' if age == 'just now' else f' {age}'
+                    row_subtitle = f'Synced{age_suffix}'
             elif has_root:
                 row_subtitle = 'Ready'
 
@@ -3479,7 +3490,7 @@ class GarminAnalyzerApp:
         if self.library_modal_resync_button:
             self.library_modal_resync_button.props(add='disable')
         try:
-            report = await self.library_manager.ingest_drop_files(selected_paths)
+            report = await self.library_manager.ingest_files(selected_paths)
             self._library_last_report_key = self._sync_report_key(report)
             await self._apply_library_sync_side_effects(report, notify_user=True)
             await self.refresh_library_widget_status()

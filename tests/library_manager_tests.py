@@ -1,6 +1,7 @@
 import os
 import tempfile
 import time
+import asyncio
 import unittest
 from pathlib import Path
 
@@ -34,22 +35,31 @@ class LibraryManagerTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp_dir.name)
         self.db_path = self.root / "test.db"
         self.library_root = self.root / "library"
-        self.drop_cache = self.root / "drop_cache"
+        self.import_cache = self.root / "import_cache"
         self.library_root.mkdir(parents=True, exist_ok=True)
-        self.drop_cache.mkdir(parents=True, exist_ok=True)
+        self.import_cache.mkdir(parents=True, exist_ok=True)
         self.db = DatabaseManager(str(self.db_path))
         self.analyzer = StubAnalyzer()
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def _create_manager(self, *, interval=3600, retention_seconds=24 * 60 * 60):
+    def _create_manager(
+        self,
+        *,
+        interval=3600,
+        retention_seconds=24 * 60 * 60,
+        live_check_interval=5.0,
+        event_debounce=1.2,
+    ):
         return LibraryManager(
             db=self.db,
             analyzer=self.analyzer,
             auto_sync_interval_sec=interval,
-            drop_cache_dir=str(self.drop_cache),
-            drop_cache_max_age_seconds=retention_seconds,
+            live_check_interval_sec=live_check_interval,
+            event_debounce_sec=event_debounce,
+            import_cache_dir=str(self.import_cache),
+            import_cache_max_age_seconds=retention_seconds,
         )
 
     def _write_fit(self, path: Path, payload: bytes = b"fit-data-1"):
@@ -79,12 +89,12 @@ class LibraryManagerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await manager.stop()
 
-    async def test_manual_drop_ingest_flows_through_hash_dedupe(self):
+    async def test_manual_import_flows_through_hash_dedupe(self):
         fit_path = self._write_fit(self.root / "one_off.fit", payload=b"same-content")
         manager = self._create_manager()
 
-        report_1 = await manager.ingest_drop_files([str(fit_path)])
-        report_2 = await manager.ingest_drop_files([str(fit_path)])
+        report_1 = await manager.ingest_files([str(fit_path)])
+        report_2 = await manager.ingest_files([str(fit_path)])
 
         self.assertEqual(report_1.reason, SyncReason.DROP)
         self.assertEqual(report_1.imported_new, 1)
@@ -124,9 +134,9 @@ class LibraryManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(os.path.realpath(row["file_path"]), os.path.realpath(str(moved)))
         self.assertEqual(row["import_status"], "imported")
 
-    async def test_startup_cleanup_removes_stale_drop_cache_files(self):
-        stale_file = self._write_fit(self.drop_cache / "old_drop.fit", payload=b"old")
-        fresh_file = self._write_fit(self.drop_cache / "fresh_drop.fit", payload=b"fresh")
+    async def test_startup_cleanup_removes_stale_import_cache_files(self):
+        stale_file = self._write_fit(self.import_cache / "old_import.fit", payload=b"old")
+        fresh_file = self._write_fit(self.import_cache / "fresh_import.fit", payload=b"fresh")
 
         now = time.time()
         stale_ts = now - (48 * 60 * 60)
@@ -187,6 +197,34 @@ class LibraryManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row["is_missing"], 0)
         self.assertIsNone(row["missing_since_at"])
+
+    async def test_live_monitor_imports_new_file_without_manual_resync(self):
+        manager = self._create_manager(
+            interval=3600,
+            live_check_interval=0.25,
+            event_debounce=0.2,
+        )
+        manager._set_setting("library_root", str(self.library_root))
+
+        try:
+            await manager.start()
+            self.assertEqual(self.db.get_count(), 0)
+
+            fit_path = self._write_fit(self.library_root / "live_added.fit", payload=b"live-add")
+            expected_hash = calculate_file_hash(str(fit_path))
+
+            deadline = time.monotonic() + 5.0
+            imported = False
+            while time.monotonic() < deadline:
+                if self.db.activity_exists(expected_hash):
+                    imported = True
+                    break
+                await asyncio.sleep(0.15)
+
+            self.assertTrue(imported, "live monitor did not ingest newly added FIT file")
+            self.assertEqual(self.db.get_count(), 1)
+        finally:
+            await manager.stop()
 
 
 if __name__ == "__main__":

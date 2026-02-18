@@ -17,6 +17,16 @@ from db import DatabaseManager, calculate_file_hash
 
 logger = logging.getLogger(__name__)
 
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+
+    WATCHDOG_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    FileSystemEventHandler = object  # type: ignore[assignment]
+    Observer = None  # type: ignore[assignment]
+    WATCHDOG_AVAILABLE = False
+
 
 SCHEMA_FALLBACK_SQL = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -85,59 +95,108 @@ class LibraryStatus:
     last_report: Optional[SyncReport]
 
 
+class _FitFileEventHandler(FileSystemEventHandler):
+    """Watchdog event handler that forwards FIT file changes to async loop."""
+
+    def __init__(self, notify_callback):
+        super().__init__()
+        self._notify_callback = notify_callback
+
+    def on_created(self, event):  # pragma: no cover - exercised when watchdog installed
+        self._handle(event)
+
+    def on_modified(self, event):  # pragma: no cover - exercised when watchdog installed
+        self._handle(event)
+
+    def on_moved(self, event):  # pragma: no cover - exercised when watchdog installed
+        self._handle(event)
+
+    def on_deleted(self, event):  # pragma: no cover - exercised when watchdog installed
+        self._handle(event)
+
+    def _handle(self, event):  # pragma: no cover - exercised when watchdog installed
+        if getattr(event, "is_directory", False):
+            return
+        src_path = getattr(event, "src_path", "") or ""
+        dest_path = getattr(event, "dest_path", "") or ""
+        path = dest_path or src_path
+        if path.lower().endswith(".fit"):
+            self._notify_callback()
+
+
 class LibraryManager:
-    """Backend orchestration for library mode sync and one-off drop imports."""
+    """Backend orchestration for library mode sync and one-off manual imports."""
 
     def __init__(
         self,
         db: Optional[DatabaseManager] = None,
         analyzer: Optional[FitAnalyzer] = None,
         auto_sync_interval_sec: int = 60,
+        live_check_interval_sec: float = 5.0,
+        event_debounce_sec: float = 1.2,
         migration_sql_path: Optional[str] = None,
-        drop_cache_dir: Optional[str] = None,
-        drop_cache_max_age_seconds: int = 24 * 60 * 60,
+        import_cache_dir: Optional[str] = None,
+        import_cache_max_age_seconds: int = 24 * 60 * 60,
     ) -> None:
         self.db = db or DatabaseManager()
         self.analyzer = analyzer or FitAnalyzer()
         self._sync_lock = asyncio.Lock()
         self._timer_task: Optional[asyncio.Task] = None
+        self._event_task: Optional[asyncio.Task] = None
+        self._poll_task: Optional[asyncio.Task] = None
+        self._event_trigger = asyncio.Event()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._observer = None
         self._running = False
         self._last_report: Optional[SyncReport] = None
         self._default_interval_sec = max(10, int(auto_sync_interval_sec))
+        self._live_check_interval_sec = max(1.0, float(live_check_interval_sec))
+        self._event_debounce_sec = max(0.25, float(event_debounce_sec))
+        self._last_poll_signature: Optional[Tuple[int, int, int, int]] = None
         self._migration_sql_path = Path(migration_sql_path) if migration_sql_path else (
             Path(__file__).resolve().parent / "migrations" / "001_library_mode.sql"
         )
-        self.drop_cache_dir = Path(drop_cache_dir) if drop_cache_dir else (
-            Path.home() / ".ultrastate" / "drop_cache"
+        self.import_cache_dir = Path(import_cache_dir) if import_cache_dir else (
+            Path.home() / ".ultrastate" / "import_cache"
         )
-        self.drop_cache_max_age_seconds = max(3600, int(drop_cache_max_age_seconds))
+        self.import_cache_max_age_seconds = max(3600, int(import_cache_max_age_seconds))
 
         self._ensure_schema()
         self._initialize_default_settings()
-        self._ensure_drop_cache_directory()
+        self._ensure_import_cache_directory()
 
     async def start(self) -> None:
         if self._running:
             return
 
         self._running = True
-        # Boot-safe drop-cache retention to prevent unbounded growth.
-        await asyncio.to_thread(self._cleanup_drop_cache)
+        self._loop = asyncio.get_running_loop()
+        # Boot-safe import-cache retention to prevent unbounded growth.
+        await asyncio.to_thread(self._cleanup_import_cache)
         await self.sync_library(SyncReason.STARTUP)
         self._timer_task = asyncio.create_task(self._interval_loop())
+        await self._start_live_monitoring()
 
     async def stop(self) -> None:
         self._running = False
-        if self._timer_task is None:
-            return
+        await self._stop_live_monitoring()
+        self._event_trigger.set()
 
-        task = self._timer_task
+        tasks: List[asyncio.Task] = []
+        for task in (self._timer_task, self._event_task, self._poll_task):
+            if task is not None:
+                task.cancel()
+                tasks.append(task)
+
         self._timer_task = None
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        self._event_task = None
+        self._poll_task = None
+
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def set_library_root(self, path: str) -> None:
         normalized = self._normalize_path(path)
@@ -150,6 +209,11 @@ class LibraryManager:
 
         self._set_setting("library_root", normalized)
         await self.sync_library(SyncReason.MANUAL)
+        self._last_poll_signature = await asyncio.to_thread(
+            self._compute_fit_tree_signature, normalized
+        )
+        if self._running:
+            await self._restart_live_monitoring()
 
     async def get_library_root(self) -> Optional[str]:
         return self._get_setting("library_root")
@@ -160,7 +224,7 @@ class LibraryManager:
     async def resync_now(self) -> SyncReport:
         return await self.sync_library(SyncReason.MANUAL)
 
-    async def ingest_drop_files(self, paths: Sequence[str]) -> SyncReport:
+    async def ingest_files(self, paths: Sequence[str]) -> SyncReport:
         normalized_paths: List[str] = []
         for raw_path in paths:
             normalized = self._normalize_path(raw_path)
@@ -179,7 +243,7 @@ class LibraryManager:
                 started_at=now_iso,
                 finished_at=now_iso,
                 failed=1,
-                errors=["No valid FIT files were provided to drag-and-drop ingest."],
+                errors=["No valid FIT files were provided to manual import ingest."],
             )
             self._last_report = report
             return report
@@ -211,6 +275,108 @@ class LibraryManager:
                 now_iso = self._utc_now_iso()
                 self._set_setting("library_last_sync_at", now_iso)
                 self._set_setting("library_last_sync_status", "error")
+
+    async def _start_live_monitoring(self) -> None:
+        """Start low-latency change detection (watchdog if available, polling fallback)."""
+        if self._event_task is None:
+            self._event_task = asyncio.create_task(self._event_sync_loop())
+
+        library_root = self._get_setting("library_root")
+        if not library_root:
+            return
+
+        self._last_poll_signature = await asyncio.to_thread(
+            self._compute_fit_tree_signature, library_root
+        )
+
+        if WATCHDOG_AVAILABLE:
+            if self._observer is not None:
+                return
+            try:
+                observer = Observer()
+                observer.schedule(
+                    _FitFileEventHandler(self._notify_live_file_event),
+                    library_root,
+                    recursive=True,
+                )
+                observer.start()
+                self._observer = observer
+                return
+            except Exception as exc:
+                logger.warning("Watchdog live monitoring unavailable; falling back to polling: %s", exc)
+                self._observer = None
+
+        if self._poll_task is None:
+            self._poll_task = asyncio.create_task(self._poll_live_changes_loop())
+
+    async def _stop_live_monitoring(self) -> None:
+        if self._observer is not None:
+            try:
+                self._observer.stop()
+                self._observer.join(timeout=1.0)
+            except Exception:
+                pass
+            self._observer = None
+
+    async def _restart_live_monitoring(self) -> None:
+        await self._stop_live_monitoring()
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+            self._poll_task = None
+        await self._start_live_monitoring()
+
+    def _notify_live_file_event(self) -> None:
+        if not self._running or self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(self._event_trigger.set)
+
+    async def _event_sync_loop(self) -> None:
+        """Debounced sync trigger loop for live file events."""
+        while self._running:
+            try:
+                await self._event_trigger.wait()
+                self._event_trigger.clear()
+                await asyncio.sleep(self._event_debounce_sec)
+                # Coalesce event bursts into one sync.
+                while self._event_trigger.is_set():
+                    self._event_trigger.clear()
+                    await asyncio.sleep(self._event_debounce_sec)
+                if not self._running:
+                    break
+                await self.sync_library(SyncReason.INTERVAL)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("Live sync trigger loop error: %s", exc)
+
+    async def _poll_live_changes_loop(self) -> None:
+        """Fallback live detector when watchdog is unavailable."""
+        while self._running:
+            try:
+                await asyncio.sleep(self._live_check_interval_sec)
+                if not self._running:
+                    break
+                library_root = self._get_setting("library_root")
+                if not library_root or not os.path.isdir(library_root):
+                    continue
+
+                signature = await asyncio.to_thread(
+                    self._compute_fit_tree_signature, library_root
+                )
+                if self._last_poll_signature is None:
+                    self._last_poll_signature = signature
+                    continue
+                if signature != self._last_poll_signature:
+                    self._last_poll_signature = signature
+                    self._event_trigger.set()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("Live polling loop error: %s", exc)
 
     async def _run_sync(
         self,
@@ -510,36 +676,62 @@ class LibraryManager:
 
         return sorted(set(fit_files)), errors
 
-    def _ensure_drop_cache_directory(self) -> None:
+    def _compute_fit_tree_signature(self, root: str) -> Tuple[int, int, int, int]:
+        """Fast signature for FIT tree change detection."""
+        file_count = 0
+        total_size = 0
+        newest_mtime_ns = 0
+        path_fingerprint = 0
+
+        for dir_path, _dir_names, file_names in os.walk(root, followlinks=False):
+            for file_name in file_names:
+                if not file_name.lower().endswith(".fit"):
+                    continue
+                full_path = os.path.join(dir_path, file_name)
+                try:
+                    stat_result = os.stat(full_path)
+                except OSError:
+                    continue
+
+                normalized = self._normalize_path(full_path) or full_path
+                file_count += 1
+                total_size += int(stat_result.st_size)
+                newest_mtime_ns = max(newest_mtime_ns, int(stat_result.st_mtime_ns))
+                path_fingerprint ^= hash(normalized.lower())
+                path_fingerprint ^= int(stat_result.st_mtime_ns)
+
+        return (file_count, total_size, newest_mtime_ns, path_fingerprint)
+
+    def _ensure_import_cache_directory(self) -> None:
         try:
-            self.drop_cache_dir.mkdir(parents=True, exist_ok=True)
+            self.import_cache_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            fallback_dir = Path(tempfile.gettempdir()) / "ultrastate_drop_cache"
+            fallback_dir = Path(tempfile.gettempdir()) / "ultrastate_import_cache"
             logger.warning(
-                "Unable to create drop cache directory '%s': %s. Falling back to '%s'.",
-                self.drop_cache_dir,
+                "Unable to create import cache directory '%s': %s. Falling back to '%s'.",
+                self.import_cache_dir,
                 exc,
                 fallback_dir,
             )
             try:
                 fallback_dir.mkdir(parents=True, exist_ok=True)
-                self.drop_cache_dir = fallback_dir
+                self.import_cache_dir = fallback_dir
             except OSError as fallback_exc:
                 logger.warning(
-                    "Unable to create fallback drop cache directory '%s': %s",
+                    "Unable to create fallback import cache directory '%s': %s",
                     fallback_dir,
                     fallback_exc,
                 )
 
-    def _cleanup_drop_cache(self) -> None:
-        """Delete cached drop files older than configured retention window."""
-        self._ensure_drop_cache_directory()
+    def _cleanup_import_cache(self) -> None:
+        """Delete cached import files older than configured retention window."""
+        self._ensure_import_cache_directory()
 
-        cutoff_ts = time.time() - self.drop_cache_max_age_seconds
+        cutoff_ts = time.time() - self.import_cache_max_age_seconds
         try:
-            entries = list(self.drop_cache_dir.iterdir())
+            entries = list(self.import_cache_dir.iterdir())
         except OSError as exc:
-            logger.warning("Unable to scan drop cache directory '%s': %s", self.drop_cache_dir, exc)
+            logger.warning("Unable to scan import cache directory '%s': %s", self.import_cache_dir, exc)
             return
 
         for entry in entries:
@@ -551,7 +743,7 @@ class LibraryManager:
                 entry.unlink()
             except OSError as exc:
                 # Best effort only: never fail app boot for cleanup issues.
-                logger.warning("Unable to delete stale drop cache file '%s': %s", entry, exc)
+                logger.warning("Unable to delete stale import cache file '%s': %s", entry, exc)
 
     def _finalize_sync(self, report: SyncReport, final_status: str) -> None:
         self._set_setting("library_last_sync_at", report.finished_at)
