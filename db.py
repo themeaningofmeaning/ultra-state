@@ -149,6 +149,20 @@ class DatabaseManager:
         with self.get_connection() as conn:
             conn.execute("DELETE FROM activities WHERE hash = ?", (file_hash,))
 
+    def delete_library_file(self, file_hash):
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM library_files WHERE content_hash = ?", (file_hash,))
+
+    def get_activity_file_path(self, file_hash):
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT file_path FROM activities WHERE hash = ?",
+                (file_hash,),
+            ).fetchone()
+            if row:
+                return row[0]
+            return None
+
     def get_last_session_id(self):
         """Retrieve the session_id from the most recent import."""
         with self.get_connection() as conn:
