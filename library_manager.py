@@ -6,16 +6,24 @@ import os
 import tempfile
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
-from analyzer import FitAnalyzer
+from analyzer import ANALYZER_DATA_VERSION, FitAnalyzer
 from db import DatabaseManager, calculate_file_hash
 
 
 logger = logging.getLogger(__name__)
+
+
+REPROCESS_BATCH_STARTUP = 40
+REPROCESS_BATCH_INTERVAL = 5
+REPROCESS_BATCH_MANUAL = 200
+RETRY_BASE_SEC = 300
+RETRY_MAX_SEC = 21600
+MAX_AUTO_RETRY_ATTEMPTS = 8
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -83,6 +91,9 @@ class SyncReport:
     unchanged: int = 0
     missing_files: int = 0
     failed: int = 0
+    reprocessed_upgraded: int = 0
+    reprocess_failed: int = 0
+    reprocess_missing_source: int = 0
     skipped_busy: bool = False
     errors: List[str] = field(default_factory=list)
 
@@ -424,20 +435,30 @@ class LibraryManager:
                     candidate_paths = sorted(set(override_paths))
 
                 session_id = int(time.time())
+                # Only skip hashes that were freshly ingested this sync pass;
+                # unchanged library rows still need stale-version reprocessing.
+                processed_hashes: set[str] = set()
                 for path in candidate_paths:
-                    await self._process_candidate_file(
+                    processed_hash = await self._process_candidate_file(
                         path=path,
                         report=report,
                         session_id=session_id,
                         reason=reason,
                         source_type=source_type,
                     )
+                    if processed_hash:
+                        processed_hashes.add(processed_hash)
 
                 if override_paths is None and source_type == "library":
                     report.missing_files = self._reconcile_missing_library_files(
                         scan_started_at=started_at,
                         reason=reason,
                     )
+                    (
+                        report.reprocessed_upgraded,
+                        report.reprocess_failed,
+                        report.reprocess_missing_source,
+                    ) = await self._run_reprocess_pass(reason=reason, processed_hashes=processed_hashes)
 
                 report.finished_at = self._utc_now_iso()
                 final_status = "error" if (report.failed > 0 or report.errors) else "ok"
@@ -457,12 +478,12 @@ class LibraryManager:
         session_id: int,
         reason: SyncReason,
         source_type: str,
-    ) -> None:
+    ) -> Optional[str]:
         normalized_path = self._normalize_path(path)
         if not normalized_path:
             report.failed += 1
             report.errors.append("Invalid file path encountered: {0}".format(path))
-            return
+            return None
 
         report.scanned_files += 1
         try:
@@ -470,7 +491,7 @@ class LibraryManager:
         except OSError as exc:
             report.failed += 1
             report.errors.append("{0}: {1}".format(normalized_path, exc))
-            return
+            return None
 
         existing_by_path = self._get_library_row_by_path(normalized_path)
         if (
@@ -488,7 +509,7 @@ class LibraryManager:
                 source_type=source_type,
             )
             report.unchanged += 1
-            return
+            return None
 
         try:
             content_hash = await asyncio.to_thread(calculate_file_hash, normalized_path)
@@ -496,7 +517,7 @@ class LibraryManager:
         except Exception as exc:
             report.failed += 1
             report.errors.append("Hashing failed for {0}: {1}".format(normalized_path, exc))
-            return
+            return None
 
         existing_by_hash = self._get_library_row_by_hash(content_hash)
         if existing_by_hash:
@@ -518,7 +539,7 @@ class LibraryManager:
                         report.moved_or_renamed += 1
                     else:
                         report.duplicates += 1
-                    return
+                    return None
 
                 ingest_ok, ingest_error = await self._ingest_file(
                     file_path=normalized_path,
@@ -536,7 +557,7 @@ class LibraryManager:
                     )
                     self._update_activity_file_path(content_hash, normalized_path)
                     report.imported_new += 1
-                    return
+                    return content_hash
 
                 report.failed += 1
                 error_text = ingest_error or "Unknown ingest error."
@@ -550,7 +571,7 @@ class LibraryManager:
                     error_text=error_text,
                 )
                 report.errors.append("{0}: {1}".format(normalized_path, error_text))
-                return
+                return None
 
             ingest_ok, ingest_error = await self._ingest_file(
                 file_path=normalized_path,
@@ -568,7 +589,7 @@ class LibraryManager:
                 )
                 self._update_activity_file_path(content_hash, normalized_path)
                 report.imported_new += 1
-                return
+                return content_hash
 
             report.failed += 1
             error_text = ingest_error or "Unknown ingest error."
@@ -582,7 +603,7 @@ class LibraryManager:
                 error_text=error_text,
             )
             report.errors.append("{0}: {1}".format(normalized_path, error_text))
-            return
+            return None
 
         self._insert_pending(
             content_hash=content_hash,
@@ -608,7 +629,7 @@ class LibraryManager:
                 source_type=source_type,
             )
             report.imported_new += 1
-            return
+            return content_hash
 
         report.failed += 1
         error_text = ingest_error or "Unknown ingest error."
@@ -622,6 +643,7 @@ class LibraryManager:
             error_text=error_text,
         )
         report.errors.append("{0}: {1}".format(normalized_path, error_text))
+        return None
 
     async def _ingest_file(self, file_path: str, content_hash: str, session_id: int) -> Tuple[bool, str]:
         try:
@@ -632,6 +654,116 @@ class LibraryManager:
             return True, ""
         except Exception as exc:
             return False, str(exc)
+
+    async def _run_reprocess_pass(
+        self,
+        reason: SyncReason,
+        processed_hashes: set[str],
+    ) -> Tuple[int, int, int]:
+        batch_size = self._compute_reprocess_batch_size(reason)
+        if batch_size <= 0:
+            return 0, 0, 0
+
+        now_iso = self._utc_now_iso()
+        manual_mode = reason == SyncReason.MANUAL
+        candidates = self.db.get_stale_activity_candidates(
+            target_version=ANALYZER_DATA_VERSION,
+            now_iso=now_iso,
+            limit=batch_size,
+            manual_mode=manual_mode,
+        )
+
+        upgraded = 0
+        failed = 0
+        missing_source = 0
+
+        for row in candidates:
+            content_hash = row["hash"]
+            if not content_hash or content_hash in processed_hashes:
+                continue
+            processed_hashes.add(content_hash)
+
+            fit_path = row["activity_file_path"] or row["library_file_path"]
+            is_marked_missing = bool(row["is_missing"])
+
+            if is_marked_missing or not fit_path or not os.path.exists(fit_path):
+                self.db.mark_activity_missing_source(content_hash, self._utc_now_iso())
+                missing_source += 1
+                continue
+
+            if not self.db.mark_activity_reprocessing(content_hash, self._utc_now_iso()):
+                continue
+
+            error_text = ""
+            result = None
+            try:
+                result = await asyncio.to_thread(self.analyzer.analyze_file, fit_path)
+            except Exception as exc:
+                error_text = str(exc)
+
+            if result:
+                try:
+                    processed_at = self._utc_now_iso()
+                    result["analyzer_version"] = int(
+                        result.get("analyzer_version") or ANALYZER_DATA_VERSION
+                    )
+                    result["analysis_status"] = "fresh"
+                    result["analysis_attempts"] = 0
+                    result["analysis_last_error"] = None
+                    result["analysis_next_retry_at"] = None
+                    result["analyzed_at"] = processed_at
+                    result["last_processed_at"] = processed_at
+
+                    # session_id/import_session_id remain immutable via COALESCE in UPSERT.
+                    self.db.insert_activity(result, content_hash, session_id=0, file_path=fit_path)
+                    self.db.mark_activity_reprocess_success(
+                        content_hash,
+                        now_iso=processed_at,
+                        analyzer_version=result["analyzer_version"],
+                    )
+                    upgraded += 1
+                    continue
+                except Exception as exc:
+                    error_text = str(exc)
+
+            if not error_text:
+                error_text = "Analyzer returned no activity data."
+            failed_at = self._utc_now_iso()
+            attempts_after_failure = int(row["analysis_attempts"] or 0) + 1
+            retry_at = self._compute_retry_at(attempts_after_failure, failed_at)
+            self.db.mark_activity_reprocess_failure(
+                file_hash=content_hash,
+                now_iso=failed_at,
+                error_text=error_text,
+                next_retry_at=retry_at,
+            )
+            failed += 1
+
+        return upgraded, failed, missing_source
+
+    @staticmethod
+    def _compute_reprocess_batch_size(reason: SyncReason) -> int:
+        if reason == SyncReason.STARTUP:
+            return REPROCESS_BATCH_STARTUP
+        if reason == SyncReason.MANUAL:
+            return REPROCESS_BATCH_MANUAL
+        return REPROCESS_BATCH_INTERVAL
+
+    @staticmethod
+    def _compute_retry_at(attempts: int, now_iso: str) -> Optional[str]:
+        if attempts >= MAX_AUTO_RETRY_ATTEMPTS:
+            return None
+
+        backoff_sec = RETRY_BASE_SEC * (2 ** max(0, attempts - 1))
+        delay_sec = min(RETRY_MAX_SEC, backoff_sec)
+
+        try:
+            base_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+        except ValueError:
+            base_dt = datetime.now(timezone.utc)
+
+        retry_dt = base_dt + timedelta(seconds=delay_sec)
+        return retry_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     def _initialize_default_settings(self) -> None:
         if self._get_setting("library_auto_sync_interval_sec") is None:

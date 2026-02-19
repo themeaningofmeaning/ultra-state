@@ -34,7 +34,15 @@ class DatabaseManager:
                     avg_cadence INTEGER,
                     json_data TEXT,
                     session_id INTEGER,
-                    file_path TEXT
+                    import_session_id INTEGER,
+                    file_path TEXT,
+                    analyzer_version INTEGER NOT NULL DEFAULT 0,
+                    analysis_status TEXT NOT NULL DEFAULT 'stale',
+                    analysis_attempts INTEGER NOT NULL DEFAULT 0,
+                    analysis_last_error TEXT,
+                    analysis_next_retry_at TEXT,
+                    analyzed_at TEXT,
+                    last_processed_at TEXT
                 )
             ''')
             
@@ -53,13 +61,53 @@ class DatabaseManager:
                 'elevation_ft': 'INTEGER',
                 'efficiency_factor': 'REAL',
                 'decoupling': 'REAL',
-                'avg_cadence': 'INTEGER'
+                'avg_cadence': 'INTEGER',
+                'import_session_id': 'INTEGER',
+                'analyzer_version': 'INTEGER NOT NULL DEFAULT 0',
+                'analysis_status': "TEXT NOT NULL DEFAULT 'stale'",
+                'analysis_attempts': 'INTEGER NOT NULL DEFAULT 0',
+                'analysis_last_error': 'TEXT',
+                'analysis_next_retry_at': 'TEXT',
+                'analyzed_at': 'TEXT',
+                'last_processed_at': 'TEXT',
             }
             
             for col, dtype in migrations.items():
                 if col not in columns:
                     print(f"Migrating database: Adding {col} column...")
                     conn.execute(f"ALTER TABLE activities ADD COLUMN {col} {dtype}")
+
+            # Backfill for existing databases.
+            conn.execute(
+                "UPDATE activities SET import_session_id = session_id "
+                "WHERE import_session_id IS NULL"
+            )
+            conn.execute(
+                "UPDATE activities SET analyzer_version = 0 "
+                "WHERE analyzer_version IS NULL"
+            )
+            conn.execute(
+                "UPDATE activities SET analysis_status = 'stale' "
+                "WHERE analysis_status IS NULL OR analysis_status = ''"
+            )
+            conn.execute(
+                "UPDATE activities SET analysis_attempts = 0 "
+                "WHERE analysis_attempts IS NULL"
+            )
+            conn.execute(
+                "UPDATE activities SET analysis_status = 'stale' "
+                "WHERE analysis_status = 'reprocessing'"
+            )
+
+            # Indexes for stale scan + timeline queries.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_activities_analysis_scan "
+                "ON activities(analysis_status, analyzer_version, analysis_next_retry_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_activities_import_session "
+                "ON activities(import_session_id)"
+            )
 
     def insert_activity(self, activity_data, file_hash, session_id, file_path=None):
         json_str = json.dumps(activity_data, default=str)
@@ -72,20 +120,59 @@ class DatabaseManager:
         except:
             pace_val = 0.0
 
+        now_iso = datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
+        analyzer_version = int(activity_data.get('analyzer_version') or 0)
+        analysis_status = activity_data.get('analysis_status') or 'fresh'
+        analysis_attempts = int(activity_data.get('analysis_attempts') or 0)
+        analysis_last_error = activity_data.get('analysis_last_error')
+        analysis_next_retry_at = activity_data.get('analysis_next_retry_at')
+        analyzed_at = activity_data.get('analyzed_at') or now_iso
+        last_processed_at = activity_data.get('last_processed_at') or now_iso
+        import_session_id = activity_data.get('import_session_id')
+        if import_session_id is None:
+            import_session_id = session_id
+
         with self.get_connection() as conn:
             conn.execute('''
-                INSERT OR REPLACE INTO activities (
+                INSERT INTO activities (
                     hash, filename, date, timestamp_utc,
                     distance_mi, duration_min, pace_min_mi,
                     avg_hr, max_hr, elevation_ft,
                     efficiency_factor, decoupling, avg_cadence,
-                    json_data, session_id, file_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    json_data, session_id, import_session_id, file_path,
+                    analyzer_version, analysis_status, analysis_attempts,
+                    analysis_last_error, analysis_next_retry_at,
+                    analyzed_at, last_processed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(hash) DO UPDATE SET
+                    filename = excluded.filename,
+                    date = excluded.date,
+                    timestamp_utc = excluded.timestamp_utc,
+                    distance_mi = excluded.distance_mi,
+                    duration_min = excluded.duration_min,
+                    pace_min_mi = excluded.pace_min_mi,
+                    avg_hr = excluded.avg_hr,
+                    max_hr = excluded.max_hr,
+                    elevation_ft = excluded.elevation_ft,
+                    efficiency_factor = excluded.efficiency_factor,
+                    decoupling = excluded.decoupling,
+                    avg_cadence = excluded.avg_cadence,
+                    json_data = excluded.json_data,
+                    file_path = COALESCE(excluded.file_path, activities.file_path),
+                    analyzer_version = excluded.analyzer_version,
+                    analysis_status = excluded.analysis_status,
+                    analysis_attempts = excluded.analysis_attempts,
+                    analysis_last_error = excluded.analysis_last_error,
+                    analysis_next_retry_at = excluded.analysis_next_retry_at,
+                    analyzed_at = excluded.analyzed_at,
+                    last_processed_at = excluded.last_processed_at,
+                    import_session_id = COALESCE(activities.import_session_id, excluded.import_session_id),
+                    session_id = COALESCE(activities.session_id, excluded.session_id)
             ''', (
-                file_hash, 
-                activity_data.get('filename'), 
+                file_hash,
+                activity_data.get('filename'),
                 activity_data.get('date'),
-                activity_data.get('timestamp_utc', 0), # New UTC field
+                activity_data.get('timestamp_utc', 0),  # New UTC field
                 activity_data.get('distance_mi', 0),
                 activity_data.get('moving_time_min', 0),
                 pace_val,
@@ -95,9 +182,17 @@ class DatabaseManager:
                 activity_data.get('efficiency_factor', 0),
                 activity_data.get('decoupling', 0),
                 activity_data.get('avg_cadence', 0),
-                json_str, 
-                session_id, 
-                file_path
+                json_str,
+                session_id,
+                import_session_id,
+                file_path,
+                analyzer_version,
+                analysis_status,
+                analysis_attempts,
+                analysis_last_error,
+                analysis_next_retry_at,
+                analyzed_at,
+                last_processed_at,
             ))
 
     def update_activity_map_payload(self, file_hash, map_payload, route_segments=None, bounds=None, map_payload_version=None):
@@ -166,8 +261,10 @@ class DatabaseManager:
     def get_last_session_id(self):
         """Retrieve the session_id from the most recent import."""
         with self.get_connection() as conn:
-            # Get the maximum session_id present in the table
-            row = conn.execute("SELECT MAX(session_id) FROM activities").fetchone()
+            # Use immutable import session identity when available.
+            row = conn.execute(
+                "SELECT MAX(COALESCE(import_session_id, session_id)) FROM activities"
+            ).fetchone()
             return row[0] if row[0] is not None else None
             
     def get_count(self):
@@ -202,7 +299,7 @@ class DatabaseManager:
         # --- Timeframe Filtering ---
         where_clauses = []
         if timeframe == "Last Import" and current_session_id:
-            where_clauses.append("session_id = ?")
+            where_clauses.append("COALESCE(import_session_id, session_id) = ?")
             params.append(current_session_id)
         elif timeframe == "Last 30 Days":
             date_limit = (datetime.now() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
@@ -246,6 +343,136 @@ class DatabaseManager:
                 activity['hash'] = file_hash
                 return activity
             return None
+
+    def get_stale_activity_candidates(self, target_version, now_iso, limit, manual_mode=False):
+        manual_flag = 1 if manual_mode else 0
+        with self.get_connection() as conn:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        a.hash,
+                        a.file_path AS activity_file_path,
+                        lf.file_path AS library_file_path,
+                        COALESCE(a.analyzer_version, 0) AS analyzer_version,
+                        COALESCE(a.analysis_status, 'stale') AS analysis_status,
+                        COALESCE(a.analysis_attempts, 0) AS analysis_attempts,
+                        a.analysis_next_retry_at,
+                        COALESCE(lf.is_missing, 0) AS is_missing
+                    FROM activities a
+                    LEFT JOIN library_files lf ON lf.content_hash = a.hash
+                    WHERE
+                        (
+                            COALESCE(a.analyzer_version, 0) < ?
+                            OR COALESCE(a.analysis_status, 'stale') IN ('stale', 'failed', 'stale_missing_source')
+                        )
+                        AND
+                        (
+                            COALESCE(a.analysis_status, 'stale') != 'failed'
+                            OR ? = 1
+                            OR (a.analysis_next_retry_at IS NOT NULL AND a.analysis_next_retry_at <= ?)
+                        )
+                    ORDER BY COALESCE(a.last_processed_at, a.analyzed_at, '1970-01-01T00:00:00Z') ASC
+                    LIMIT ?
+                    """,
+                    (target_version, manual_flag, now_iso, int(limit)),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # Fallback for environments where library_files table is unavailable.
+                rows = conn.execute(
+                    """
+                    SELECT
+                        a.hash,
+                        a.file_path AS activity_file_path,
+                        NULL AS library_file_path,
+                        COALESCE(a.analyzer_version, 0) AS analyzer_version,
+                        COALESCE(a.analysis_status, 'stale') AS analysis_status,
+                        COALESCE(a.analysis_attempts, 0) AS analysis_attempts,
+                        a.analysis_next_retry_at,
+                        0 AS is_missing
+                    FROM activities a
+                    WHERE
+                        (
+                            COALESCE(a.analyzer_version, 0) < ?
+                            OR COALESCE(a.analysis_status, 'stale') IN ('stale', 'failed', 'stale_missing_source')
+                        )
+                        AND
+                        (
+                            COALESCE(a.analysis_status, 'stale') != 'failed'
+                            OR ? = 1
+                            OR (a.analysis_next_retry_at IS NOT NULL AND a.analysis_next_retry_at <= ?)
+                        )
+                    ORDER BY COALESCE(a.last_processed_at, a.analyzed_at, '1970-01-01T00:00:00Z') ASC
+                    LIMIT ?
+                    """,
+                    (target_version, manual_flag, now_iso, int(limit)),
+                ).fetchall()
+        return rows
+
+    def mark_activity_reprocessing(self, file_hash, now_iso):
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE activities
+                SET
+                    analysis_status = 'reprocessing',
+                    analysis_last_error = NULL,
+                    last_processed_at = ?
+                WHERE hash = ?
+                  AND COALESCE(analysis_status, 'stale') != 'reprocessing'
+                """,
+                (now_iso, file_hash),
+            )
+            return cursor.rowcount > 0
+
+    def mark_activity_reprocess_success(self, file_hash, now_iso, analyzer_version):
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE activities
+                SET
+                    analyzer_version = ?,
+                    analysis_status = 'fresh',
+                    analysis_attempts = 0,
+                    analysis_last_error = NULL,
+                    analysis_next_retry_at = NULL,
+                    analyzed_at = ?,
+                    last_processed_at = ?
+                WHERE hash = ?
+                """,
+                (int(analyzer_version), now_iso, now_iso, file_hash),
+            )
+
+    def mark_activity_reprocess_failure(self, file_hash, now_iso, error_text, next_retry_at):
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE activities
+                SET
+                    analysis_status = 'failed',
+                    analysis_attempts = COALESCE(analysis_attempts, 0) + 1,
+                    analysis_last_error = ?,
+                    analysis_next_retry_at = ?,
+                    last_processed_at = ?
+                WHERE hash = ?
+                """,
+                (error_text, next_retry_at, now_iso, file_hash),
+            )
+
+    def mark_activity_missing_source(self, file_hash, now_iso, error_text='FIT source file missing on disk.'):
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE activities
+                SET
+                    analysis_status = 'stale_missing_source',
+                    analysis_last_error = ?,
+                    analysis_next_retry_at = NULL,
+                    last_processed_at = ?
+                WHERE hash = ?
+                """,
+                (error_text, now_iso, file_hash),
+            )
 
 # --- IMPORTANT: THIS FUNCTION IS NOW OUTSIDE THE CLASS ---
 def calculate_file_hash(filepath):

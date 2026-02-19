@@ -16,6 +16,7 @@ from hr_zones import HR_ZONE_ORDER, classify_hr_zone, hr_color_for_value, normal
 
 
 MAP_PAYLOAD_VERSION = 5
+ANALYZER_DATA_VERSION = 1
 
 def get_best_value(record, legacy_key, enhanced_key):
     val = record.get(enhanced_key) or record.get(legacy_key)
@@ -684,6 +685,7 @@ class FitAnalyzer:
         
         result = self._compute_metrics(df, filename, start_time, metadata)
         if result:
+            result['analyzer_version'] = ANALYZER_DATA_VERSION
             result['map_payload'] = map_payload
             result['map_payload_version'] = map_payload['v']
             result['route_segments'] = route_segments

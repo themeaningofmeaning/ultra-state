@@ -118,6 +118,8 @@ class GarminAnalyzerApp:
         self.library_status_dot = None
         self.library_settings_dialog = None
         self.library_modal_status_label = None
+        self.library_modal_status_dot = None
+        self.library_modal_last_synced_label = None
         self.library_modal_summary_label = None
         self.library_modal_path_label = None
         self.library_modal_path_tooltip = None
@@ -3168,13 +3170,16 @@ class GarminAnalyzerApp:
                 
                 # Status Row
                 with ui.row().classes('items-center gap-2'):
-                    self.library_modal_status_label = ui.label('Status: Not configured').classes('text-sm text-zinc-400')
+                    ui.label('Status:').classes('text-sm text-zinc-500')
+                    self.library_modal_status_dot = ui.label('●').classes('text-[10px] text-zinc-500')
+                    self.library_modal_status_label = ui.label('Not configured').classes('text-sm text-zinc-400')
                     self.library_modal_resync_button = ui.button(
                         icon='sync',
                         on_click=self.handle_library_resync,
                         color=None
                     ).props('flat round dense no-ripple').classes('text-zinc-500 hover:text-white transition-colors')
                     self.library_modal_resync_button.tooltip('Resync now')
+                self.library_modal_last_synced_label = ui.label('Last synced: Never').classes('text-xs text-zinc-500')
 
             # Stats / Summary Row
             with ui.row().classes('w-full items-center justify-between mb-6 bg-zinc-800/50 rounded-xl p-3 border border-zinc-700/30'):
@@ -3248,39 +3253,29 @@ class GarminAnalyzerApp:
         return 'text-[10px] text-zinc-500'
 
     @staticmethod
-    def _format_sync_age(finished_at):
+    def _format_sync_timestamp(finished_at):
         if not finished_at:
-            return 'just now'
+            return 'Never'
         try:
-            parsed = datetime.fromisoformat(finished_at.replace('Z', '+00:00'))
-            age_sec = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+            parsed = datetime.fromisoformat(finished_at.replace('Z', '+00:00')).astimezone()
         except Exception:
-            return 'just now'
+            return 'Unknown'
 
-        if age_sec < 60:
-            return 'just now'
-        if age_sec < 3600:
-            return f'{age_sec // 60}m ago'
-        if age_sec < 86400:
-            return f'{age_sec // 3600}h ago'
-        return f'{age_sec // 86400}d ago'
-
-    @staticmethod
-    def _sync_age_seconds(finished_at):
-        if not finished_at:
-            return None
-        try:
-            parsed = datetime.fromisoformat(finished_at.replace('Z', '+00:00'))
-            return max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
-        except Exception:
-            return None
+        hour_12 = parsed.strftime('%I').lstrip('0') or '12'
+        return f"{parsed.strftime('%a, %b')} {parsed.day} at {hour_12}:{parsed.strftime('%M %p')}"
 
     @staticmethod
     def _sync_report_key(report):
         if not report:
             return None
         reason = report.reason.value if hasattr(report.reason, 'value') else str(report.reason)
-        return f'{reason}|{report.finished_at}|{report.imported_new}|{report.failed}|{len(report.errors)}'
+        reprocessed = getattr(report, 'reprocessed_upgraded', 0)
+        reprocess_failed = getattr(report, 'reprocess_failed', 0)
+        reprocess_missing = getattr(report, 'reprocess_missing_source', 0)
+        return (
+            f'{reason}|{report.finished_at}|{report.imported_new}|{reprocessed}|'
+            f'{report.failed}|{reprocess_failed}|{reprocess_missing}|{len(report.errors)}'
+        )
 
     async def refresh_library_widget_status(self):
         """Poll library manager status and keep compact row + modal in sync."""
@@ -3294,55 +3289,69 @@ class GarminAnalyzerApp:
             status = await self.library_manager.get_status()
             report = status.last_report
             has_root = bool(status.library_root)
-            has_error = bool(has_root and report and (report.failed > 0 or report.errors))
+            root_exists = bool(status.library_root and os.path.isdir(status.library_root))
+            root_readable = bool(root_exists and os.access(status.library_root, os.R_OK))
+            root_error = bool(has_root and (not root_exists or not root_readable))
+            report_failed = bool(
+                report and (
+                    int(getattr(report, 'failed', 0) or 0) > 0
+                    or int(getattr(report, 'reprocess_failed', 0) or 0) > 0
+                    or bool(getattr(report, 'errors', None))
+                )
+            )
+            has_error = bool(root_error or report_failed)
 
             status_name = 'idle'
-            if status.sync_in_progress:
-                status_name = 'syncing'
-            elif has_error:
+            if has_error:
                 status_name = 'error'
+            elif status.sync_in_progress:
+                status_name = 'syncing'
             elif has_root:
                 status_name = 'synced'
 
-            status_line = 'Status: Not configured'
-            if status_name == 'syncing':
-                status_line = 'Status: Syncing...'
-            elif status_name == 'error':
-                status_line = 'Status: Sync error'
-            elif report and report.finished_at:
-                age = self._format_sync_age(report.finished_at)
-                age_suffix = ' just now' if age == 'just now' else f' {age}'
-                status_line = f'Status: Synced{age_suffix}'
+            status_value = 'Not configured'
+            if status_name == 'error':
+                status_value = 'Sync Error'
+            elif status_name == 'syncing':
+                status_value = 'Syncing...'
             elif has_root:
-                status_line = 'Status: Ready'
+                status_value = 'Synced'
 
             row_subtitle = 'Not configured'
-            if status_name == 'syncing':
+            if status_name == 'error':
+                row_subtitle = '⚠ Sync Error'
+            elif status_name == 'syncing':
                 row_subtitle = 'Syncing...'
-            elif status_name == 'error':
-                row_subtitle = 'Sync error'
-            elif report and report.finished_at:
-                age = self._format_sync_age(report.finished_at)
-                age_seconds = self._sync_age_seconds(report.finished_at)
-                if report.imported_new > 0 and age_seconds is not None and age_seconds <= 20:
-                    row_subtitle = f'+{report.imported_new} new'
-                else:
-                    age_suffix = ' now' if age == 'just now' else f' {age}'
-                    row_subtitle = f'Synced{age_suffix}'
             elif has_root:
-                row_subtitle = 'Ready'
+                row_subtitle = 'Synced'
 
             summary_text = ''
-            if has_root and report and not status.sync_in_progress:
+            if has_root and status.sync_in_progress:
+                summary_text = 'Upgrading older runs...'
+            elif has_root and report and not status.sync_in_progress:
                 if report.imported_new > 0:
                     summary_text = f'+{report.imported_new} new activities'
-                elif report.failed > 0:
-                    summary_text = f'{report.failed} failed'
-                elif getattr(report, 'missing_files', 0) > 0:
-                    summary_text = f'{report.missing_files} missing on disk'
+                elif getattr(report, 'reprocessed_upgraded', 0) > 0:
+                    summary_text = f'Upgraded {report.reprocessed_upgraded} older run(s)'
+                elif report.failed > 0 or getattr(report, 'reprocess_failed', 0) > 0:
+                    total_failures = report.failed + getattr(report, 'reprocess_failed', 0)
+                    summary_text = f'{total_failures} failed'
+                elif (
+                    getattr(report, 'missing_files', 0) > 0
+                    or getattr(report, 'reprocess_missing_source', 0) > 0
+                ):
+                    total_missing = (
+                        getattr(report, 'missing_files', 0)
+                        + getattr(report, 'reprocess_missing_source', 0)
+                    )
+                    summary_text = f'{total_missing} missing on disk'
                 elif report.finished_at:
                     # Do not show "Last synced..." here to avoid redundancy with the header status.
                     summary_text = ''
+
+            last_synced_text = 'Last synced: Never'
+            if report and report.finished_at:
+                last_synced_text = f'Last synced: {self._format_sync_timestamp(report.finished_at)}'
 
             if self.library_status_row_label:
                 self.library_status_row_label.text = 'Library'
@@ -3361,11 +3370,23 @@ class GarminAnalyzerApp:
                 self.library_status_dot.classes(remove='text-zinc-500 text-amber-300 text-red-400 text-emerald-400 animate-pulse')
                 self.library_status_dot.classes(add=self._status_dot_classes(status_name))
 
+            if self.library_modal_status_dot:
+                self.library_modal_status_dot.classes(remove='text-zinc-500 text-amber-300 text-red-400 text-emerald-400 animate-pulse')
+                self.library_modal_status_dot.classes(add=self._status_dot_classes(status_name))
+
             if self.library_status_row_tooltip:
-                self.library_status_row_tooltip.text = status.library_root or 'Not configured'
+                if root_error:
+                    self.library_status_row_tooltip.text = (
+                        f'Library folder is missing or unreadable: {status.library_root}'
+                    )
+                else:
+                    self.library_status_row_tooltip.text = status.library_root or 'Not configured'
 
             if self.library_modal_status_label:
-                self.library_modal_status_label.text = status_line
+                self.library_modal_status_label.text = status_value
+
+            if self.library_modal_last_synced_label:
+                self.library_modal_last_synced_label.text = last_synced_text
 
             if self.library_modal_summary_label:
                 self.library_modal_summary_label.text = summary_text or ' '
@@ -3378,7 +3399,12 @@ class GarminAnalyzerApp:
 
             if self.library_modal_error_label:
                 if has_error:
-                    error_text = report.errors[0] if report and report.errors else 'Last sync failed.'
+                    if root_error:
+                        error_text = 'Configured library folder is missing or unreadable. Choose a valid folder.'
+                    elif report and report.errors:
+                        error_text = report.errors[0]
+                    else:
+                        error_text = 'Last sync failed.'
                     if len(error_text) > 240:
                         error_text = f'{error_text[:237]}...'
                     self.library_modal_error_label.text = error_text
@@ -3425,25 +3451,38 @@ class GarminAnalyzerApp:
         if not report:
             return
 
+        imported_new = int(getattr(report, 'imported_new', 0) or 0)
+        reprocessed_upgraded = int(getattr(report, 'reprocessed_upgraded', 0) or 0)
+        reprocess_failed = int(getattr(report, 'reprocess_failed', 0) or 0)
+        reprocess_missing = int(getattr(report, 'reprocess_missing_source', 0) or 0)
+        missing_files = int(getattr(report, 'missing_files', 0) or 0)
+
         self.current_session_id = self.db.get_last_session_id()
         self._refresh_runs_count_label()
 
-        if report.imported_new > 0:
+        if imported_new > 0 or reprocessed_upgraded > 0:
             await self.refresh_data_view()
 
         if not notify_user:
             return
 
-        if report.failed > 0:
+        if report.failed > 0 or reprocess_failed > 0:
+            total_failures = int(report.failed) + reprocess_failed
             ui.notify(
-                f'Sync finished with {report.failed} error(s). Imported {report.imported_new} new file(s).',
+                f'Sync finished with {total_failures} error(s). Imported {imported_new} new file(s).',
                 type='warning',
             )
-        elif report.imported_new > 0:
-            ui.notify(f'Sync complete: imported {report.imported_new} new file(s).', type='positive')
-        elif getattr(report, 'missing_files', 0) > 0:
+        elif imported_new > 0 or reprocessed_upgraded > 0:
+            fragments = []
+            if imported_new > 0:
+                fragments.append(f'imported {imported_new} new file(s)')
+            if reprocessed_upgraded > 0:
+                fragments.append(f'upgraded {reprocessed_upgraded} older run(s)')
+            ui.notify(f"Sync complete: {'; '.join(fragments)}.", type='positive')
+        elif missing_files > 0 or reprocess_missing > 0:
+            total_missing = missing_files + reprocess_missing
             ui.notify(
-                f'Sync complete: {report.missing_files} file(s) missing on disk. Activities were kept.',
+                f'Sync complete: {total_missing} file(s) missing on disk. Activities were kept.',
                 type='warning',
             )
         else:
