@@ -22,7 +22,13 @@ from plotly.subplots import make_subplots
 from nicegui import ui, run
 
 # Local imports
-from analyzer import FitAnalyzer, analyze_form, classify_split, build_map_payload_from_streams
+from analyzer import (
+    FitAnalyzer,
+    analyze_form,
+    build_map_payload_from_streams,
+    classify_split,
+    compute_training_load_and_zones,
+)
 from db import DatabaseManager
 from library_manager import LibraryManager
 from hr_zones import (
@@ -3071,7 +3077,7 @@ class GarminAnalyzerApp:
                 ).classes('w-full bg-zinc-800 text-white hover:bg-zinc-700').props('flat disable')
 
                 # Copy for AI: primary output action.
-                self.copy_btn = ui.button('COPY FOR AI', on_click=self.copy_to_llm, icon='content_copy').classes(
+                self.copy_btn = ui.button('COPY FOR AI', on_click=self.copy_to_llm, icon='auto_awesome').classes(
                     'w-full text-white font-bold tracking-wide transform transition-transform duration-300 hover:scale-[1.01]'
                 ).props('disable').style(
                     'background: linear-gradient(to right, #10b981, #14b8a6); box-shadow: 0 0 12px rgba(16, 185, 129, 0.35); border: none;'
@@ -4152,20 +4158,26 @@ root.destroy()
                 
                 if activity_hash:
                     card.on('click', lambda h=activity_hash: self.open_activity_detail_modal(h, from_feed=True))
-                
                 with card:
+                    # --- GHOST BUTTON (White Style) ---
+                    # Uses generate_copy_for_ai to ensure full data payload
+                    
+                    # Container for Ghost Button
+                    with ui.element('div').classes(
+                        'absolute top-3 right-3 z-30 '
+                        'opacity-0 group-hover:opacity-50 '
+                        'hover:!opacity-100 hover:scale-110 hover:rotate-12 '
+                        'transition-all duration-200 cursor-pointer bg-transparent rounded-full'
+                    ).on('click.stop', lambda e, h=d.get('db_hash'): self.generate_copy_for_ai(target_activity_id=h)) as btn_host:
+                        ui.tooltip('Copy Analysis to AI').classes('bg-zinc-800 text-xs font-bold shadow-lg')
+                        ui.icon('auto_awesome', size='28px').classes('text-white')
+
                     with ui.column().classes('w-full gap-1'):
-                        # --- ROW 1: Header & Calories ---
-                        with ui.row().classes('w-full justify-between items-start'):
+                        # --- ROW 1: Header ---
+                        with ui.row().classes('w-full items-start pr-10'):
                             with ui.column().classes('gap-0'):
                                 ui.label(formatted_date).classes('font-bold text-zinc-200 text-sm group-hover:text-white transition-colors')
                                 ui.label(formatted_time).classes('text-xs text-zinc-500 group-hover:text-zinc-400 transition-colors')
-                            
-                            if d.get('calories'):
-                                with ui.row().classes('items-center gap-3 text-xs text-zinc-300 bg-zinc-800/50 px-2 py-1 rounded border border-zinc-700/50 group-hover:bg-zinc-700 transition-colors'):
-                                    with ui.row().classes('items-center gap-1'):
-                                        ui.icon('local_fire_department').classes('text-xs text-orange-400')
-                                        ui.label(f"{d['calories']} cal")
                         
                         # --- ROW 2: Context Tags ---
                         with ui.row().classes('w-full items-center gap-2 mt-2'):
@@ -4238,16 +4250,22 @@ root.destroy()
                         ui.separator().classes('my-1').style('background-color: #52525b; height: 1px;')
                         with ui.row().classes('w-full justify-between items-center'):
                             with ui.row().classes('gap-6'):
+                                # Calories
+                                with ui.column().classes('items-center gap-0'):
+                                    ui.label('CALORIES').classes('text-xs text-gray-500 font-bold tracking-wider mb-0.5')
+                                    with ui.row().classes('items-center gap-1'):
+                                        ui.label(f"🔥 {int(d.get('calories') or 0)} cal").classes('text-sm font-bold text-white')
+
                                 # Avg HR
                                 with ui.column().classes('items-center gap-0'):
-                                    ui.label('AVG HR').classes('text-[9px] text-gray-500 font-bold tracking-wider mb-0.5')
+                                    ui.label('AVG HR').classes('text-xs text-gray-500 font-bold tracking-wider mb-0.5')
                                     with ui.row().classes('items-center gap-1'):
                                         ui.icon('favorite').classes('text-pink-400 text-sm')
                                         ui.label(f"{d.get('avg_hr', 0)}").classes('text-sm font-bold text-white')
                                 
                                 # Cadence
                                 with ui.column().classes('items-center gap-0'):
-                                    ui.label('CADENCE').classes('text-[9px] text-gray-500 font-bold tracking-wider mb-0.5')
+                                    ui.label('CADENCE').classes('text-xs text-gray-500 font-bold tracking-wider mb-0.5')
                                     with ui.row().classes('items-center gap-1'):
                                         ui.icon('directions_run').classes('text-blue-400 text-sm')
                                         ui.label(f"{d.get('avg_cadence', 0)}").classes('text-sm font-bold text-white')
@@ -5084,6 +5102,8 @@ Form Tag:    [{form_emoji} {form_verdict}]
 Max Speed:   {max_speed_mph:.1f} mph
 Activity Breakdown: {activity_breakdown}
 """
+
+
     
     def _get_unique_tags_from_current_data(self):
         """
@@ -7749,18 +7769,42 @@ Activity Breakdown: {activity_breakdown}
         try:
             # Export DataFrame to CSV with specified columns
             export_columns = [
-                'date', 'filename', 'distance_mi', 'pace', 'gap_pace', 
-                'efficiency_factor', 'decoupling', 'avg_hr', 'avg_resp', 
-                'avg_temp', 'avg_power', 'avg_cadence', 'hrr_list', 
-                'v_ratio', 'gct_balance', 'gct_change', 'elevation_ft', 
-                'moving_time_min', 'rest_time_min'
+                'date',
+                'filename',
+                'distance_mi',
+                'pace',
+                'gap_pace',
+                'moving_time_min',
+                'rest_time_min',
+                'avg_hr',
+                'max_hr',
+                'avg_power',
+                'avg_cadence',
+                'efficiency_factor',
+                'decoupling',
+                'load_score',
+                'zone1_mins',
+                'zone2_mins',
+                'zone3_mins',
+                'zone4_mins',
+                'zone5_mins',
+                'hrr_list',
+                'v_ratio',
+                'gct_balance',
+                'gct_change',
+                'elevation_ft',
+                'avg_resp',
+                'avg_temp',
             ]
-            
-            # Filter to only include columns that exist in the DataFrame
-            available_columns = [col for col in export_columns if col in self.df.columns]
-            
-            # Export to CSV string
-            csv_content = self.df[available_columns].to_csv(index=False)
+
+            export_df = self.df.copy()
+            text_columns = {'date', 'filename', 'pace', 'gap_pace', 'hrr_list'}
+            for col in export_columns:
+                if col not in export_df.columns:
+                    export_df[col] = '' if col in text_columns else 0
+
+            # Export to CSV string with stable, parse-safe headers
+            csv_content = export_df[export_columns].to_csv(index=False)
             
             # Append data dictionary section
             data_dictionary = """
@@ -7801,6 +7845,21 @@ TRAINING ZONES:
 - Yellow (Base Maintenance): Low EF + Low Decoupling = Building aerobic base
 - Orange (Expensive Speed): High EF + High Decoupling = Fast but unsustainable
 - Red (Struggling): Low EF + High Decoupling = Fatigue or overtraining
+
+TRAINING LOAD (load_score):
+- TRIMP-style internal load score (duration x HR intensity)
+- < 75: Recovery / Easy
+- 75-150: Maintenance / Aerobic
+- 150-300: Productive / Hard
+- > 300: Overreaching / Extreme
+
+TIME IN ZONES (zone1_mins ... zone5_mins):
+- Minutes spent in each heart-rate zone
+- Zone 1: <60% max HR (Recovery)
+- Zone 2: 60-70% max HR (Endurance)
+- Zone 3: 70-80% max HR (Steady)
+- Zone 4: 80-90% max HR (Threshold)
+- Zone 5: >90% max HR (VO2/Max Effort)
 """
             
             # Combine CSV and data dictionary
@@ -8143,127 +8202,185 @@ TRAINING ZONES:
             print(f"Cadence Click Error: {ex}")
 
     async def copy_to_llm(self):
+        """Backward-compatible sidebar handler."""
+        await self.generate_copy_for_ai()
+
+    async def generate_copy_for_ai(self, target_activity_id=None):
         """
         Copy detailed activity data to clipboard with LLM context.
-        
-        Upgrade: Uses "Cinematic Glass" Progress Modal + Sequential Processing.
+
+        If target_activity_id is provided, exports the full report for that single activity.
         """
-        # Check if we have data
         if not self.activities_data:
             ui.notify('No data to copy', type='warning')
             return
-            
-        # --- UI: Cinematic Glass Modal ---
+
         with ui.dialog() as progress_dialog, ui.card().classes(
             'bg-zinc-900/95 backdrop-blur-xl border border-white/10 rounded-2xl '
             'shadow-2xl shadow-emerald-500/20 min-w-[360px] p-6 items-start'
         ):
             with ui.column().classes('w-full gap-4'):
-                # Header
                 ui.label('Constructing Analysis...').classes('text-white font-medium tracking-wide text-lg')
-                
-                # Progress Bar (The Pill)
                 with ui.element('div').classes('w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden'):
                     progress_bar = ui.element('div').classes(
                         'h-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-300'
                     ).style('width: 0%')
-                
-                # Status Label
                 status_label = ui.label('Initializing...').classes('font-mono text-xs text-zinc-400')
-                
+
         progress_dialog.open()
-        await asyncio.sleep(0.1) # Let UI render
-        
+        await asyncio.sleep(0.1)
+
         try:
-            # --- 1. PREPARE ACTIVITIES ---
-            # Sort by date (Newest First)
-            sorted_activities = sorted(self.activities_data, 
-                                      key=lambda x: x.get('date', ''), 
-                                      reverse=True)
-            
-            # Prepare list of metadata for loop
+            if target_activity_id:
+                selected_activities = [
+                    activity for activity in self.activities_data
+                    if activity.get('db_hash') == target_activity_id
+                ]
+                if not selected_activities:
+                    ui.notify('Selected activity is no longer available', type='warning')
+                    return
+            else:
+                selected_activities = self.activities_data
+
+            sorted_activities = sorted(
+                selected_activities,
+                key=lambda x: x.get('date', ''),
+                reverse=True,
+            )
+
             files_to_process = []
             for activity in sorted_activities:
                 activity_hash = activity.get('db_hash')
-                if activity_hash:
-                    db_activity = self.db.get_activity_by_hash(activity_hash)
-                    if db_activity:
-                        fit_file_path = self._locate_fit_file(db_activity)
-                        if fit_file_path:
-                            files_to_process.append({
-                                'path': fit_file_path,
-                                'activity': activity
-                            })
-            
+                if not activity_hash:
+                    continue
+                db_activity = self.db.get_activity_by_hash(activity_hash)
+                if not db_activity:
+                    continue
+                fit_file_path = self._locate_fit_file(db_activity)
+                if fit_file_path:
+                    files_to_process.append({
+                        'path': fit_file_path,
+                        'activity': activity,
+                    })
+
+            if not files_to_process:
+                if target_activity_id:
+                    ui.notify('No FIT file found for this activity', type='warning')
+                else:
+                    ui.notify('No FIT files available to copy', type='warning')
+                return
+
             total_files = len(files_to_process)
-            lap_splits_list = []
-            
-            # --- 2. SEQUENTIAL PROCESSING LOOP ---
+            parsed_activity_payloads = []
+
             for i, info in enumerate(files_to_process):
-                # Update UI
                 count = i + 1
                 percent = int((count / total_files) * 100)
                 progress_bar.style(f'width: {percent}%')
                 status_label.set_text(f"Parsing activity {count} of {total_files}...")
-                
-                # Process Single File (Background Thread)
-                # Ensure we pass a LIST to match the function signature
+
                 batch_result = await run.io_bound(_parse_fit_files_for_clipboard, [info])
-                
-                # Result is a list of lists (because we sent a batch of 1)
-                # So we take the first item
                 if batch_result:
-                    lap_splits_list.append(batch_result[0])
+                    parsed_activity_payloads.append(batch_result[0])
                 else:
-                    lap_splits_list.append(None)
-            
-            # --- 3. BUILD REPORT TEXT ---
+                    parsed_activity_payloads.append(None)
+
             status_label.set_text("Formatting report...")
             await asyncio.sleep(0.05)
-            
+
             report_lines = []
-            
-            # We need to match activities to results. 
-            # Note: files_to_process might be smaller than sorted_activities if some files were missing.
-            # But here we iterate strictly over what we processed.
-            for info, lap_splits in zip(files_to_process, lap_splits_list):
+
+            def _safe_float(value, default=0.0):
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    return default
+                if pd.isna(parsed):
+                    return default
+                return parsed
+
+            def _fmt_optional_float(value, decimals=1):
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    return "--"
+                if pd.isna(parsed):
+                    return "--"
+                return f"{parsed:.{decimals}f}"
+
+            for info, parsed_payload in zip(files_to_process, parsed_activity_payloads):
                 activity = info['activity']
-                
-                # Extract Standard Metrics
+                parsed_payload = parsed_payload or {}
+                lap_splits = parsed_payload.get('lap_splits') or []
+
                 date = activity.get('date', '')
                 time_str = activity.get('time', '')
                 icon = activity.get('context_emoji', '🏃')
                 context = activity.get('context_name', 'Run')
-                dist = activity.get('distance_mi', 0)
+                dist = _safe_float(activity.get('distance_mi'), 0.0)
                 pace = activity.get('pace', '--:--')
-                elev = activity.get('elevation_ft', 0)
-                
-                # Physiology Metrics
+                elev = int(_safe_float(activity.get('elevation_ft'), 0))
+
                 avg_hr = activity.get('avg_hr', '--')
                 max_hr = activity.get('max_hr', '--')
-                power = activity.get('avg_power', '--')
-                ef = activity.get('efficiency_factor', 0)
-                decoupling = activity.get('decoupling', 0)
-                
-                # Decoupling Label Logic
-                if decoupling < 5: dec_label = "Excellent"
-                elif decoupling < 10: dec_label = "⚠️ Moderate"
-                else: dec_label = "🛑 High Fatigue"
-                
-                # HRR Logic
+                power = int(_safe_float(activity.get('avg_power'), 0))
+                power_display = f"{power}W" if power > 0 else "--"
+                ef = _safe_float(activity.get('efficiency_factor'), 0.0)
+                decoupling = _safe_float(activity.get('decoupling'), 0.0)
+                load_score = _safe_float(
+                    activity.get('load_score'),
+                    _safe_float(parsed_payload.get('load_score'), 0.0),
+                )
+                zone1_mins = _safe_float(
+                    activity.get('zone1_mins'),
+                    _safe_float(parsed_payload.get('zone1_mins'), 0.0),
+                )
+                zone2_mins = _safe_float(
+                    activity.get('zone2_mins'),
+                    _safe_float(parsed_payload.get('zone2_mins'), 0.0),
+                )
+                zone3_mins = _safe_float(
+                    activity.get('zone3_mins'),
+                    _safe_float(parsed_payload.get('zone3_mins'), 0.0),
+                )
+                zone4_mins = _safe_float(
+                    activity.get('zone4_mins'),
+                    _safe_float(parsed_payload.get('zone4_mins'), 0.0),
+                )
+                zone5_mins = _safe_float(
+                    activity.get('zone5_mins'),
+                    _safe_float(parsed_payload.get('zone5_mins'), 0.0),
+                )
+                zone_total_mins = zone1_mins + zone2_mins + zone3_mins + zone4_mins + zone5_mins
+                zone_total_mins = zone_total_mins if zone_total_mins > 0 else 0.0
+                zone1_pct = (zone1_mins / zone_total_mins * 100) if zone_total_mins > 0 else 0.0
+                zone2_pct = (zone2_mins / zone_total_mins * 100) if zone_total_mins > 0 else 0.0
+                zone3_pct = (zone3_mins / zone_total_mins * 100) if zone_total_mins > 0 else 0.0
+                zone4_pct = (zone4_mins / zone_total_mins * 100) if zone_total_mins > 0 else 0.0
+                zone5_pct = (zone5_mins / zone_total_mins * 100) if zone_total_mins > 0 else 0.0
+
+                if decoupling < 5:
+                    dec_label = "Excellent"
+                elif decoupling < 10:
+                    dec_label = "⚠️ Moderate"
+                else:
+                    dec_label = "🛑 High Fatigue"
+
                 hrr_list = activity.get('hrr_list', [])
                 hrr_str = "--"
                 if hrr_list and len(hrr_list) > 0:
                     hrr_str = f"{hrr_list[0]}bpm (1min)"
-                
-                te_aerobic = activity.get('aerobic_te', '--')
-                te_anaerobic = activity.get('anaerobic_te', '--')
-                
-                # Mechanics Logic
-                cadence = activity.get('avg_cadence', '--')
-                form_tag = "[✅ ELITE FORM]" if (cadence != '--' and int(cadence) > 170) else "[👍 GOOD FORM]"
-                
-                # --- FORMAT THE BLOCK ---
+
+                te_aerobic = _fmt_optional_float(
+                    activity.get('training_effect', activity.get('aerobic_te')),
+                    decimals=1,
+                )
+                te_anaerobic = _fmt_optional_float(activity.get('anaerobic_te'), decimals=1)
+
+                cadence_value = _safe_float(activity.get('avg_cadence'), 0.0)
+                cadence = int(cadence_value) if cadence_value > 0 else '--'
+                form_tag = "[✅ ELITE FORM]" if cadence_value > 170 else "[👍 GOOD FORM]"
+
                 block = f"""
 RUN: {date} {time_str}
 Type:        [{icon} {context}]
@@ -8276,11 +8393,19 @@ Elev Gain:   +{elev} ft
 PHYSIOLOGY (The Engine)
 Avg HR:      {avg_hr} bpm
 Max HR:      {max_hr} bpm
-Avg Power:   {power}W
+Avg Power:   {power_display}
 EF:          {ef:.2f} (Efficiency Factor)
 Decoupling:  {decoupling:.2f}% ({dec_label})
 HRR:         {hrr_str}
+Training Load: {load_score:.1f}
 Training Effect: {te_aerobic} Aerobic, {te_anaerobic} Anaerobic
+
+[TIME IN HEART RATE ZONES]
+Zone 1 (Recovery):  {zone1_mins:.1f}m ({zone1_pct:.1f}%)
+Zone 2 (Endurance): {zone2_mins:.1f}m ({zone2_pct:.1f}%)
+Zone 3 (Steady):    {zone3_mins:.1f}m ({zone3_pct:.1f}%)
+Zone 4 (Threshold): {zone4_mins:.1f}m ({zone4_pct:.1f}%)
+Zone 5 (Max):       {zone5_mins:.1f}m ({zone5_pct:.1f}%)
 
 MECHANICS (The Chassis)
 Avg Cadence: {cadence} spm
@@ -8288,8 +8413,7 @@ Form Tag:    {form_tag}
 
 [LAP SPLITS]"""
                 report_lines.append(block)
-                
-                # Add Splits
+
                 if lap_splits:
                     for lap in lap_splits:
                         l_num = lap.get('lap_number', 0)
@@ -8299,12 +8423,12 @@ Form Tag:    {form_tag}
                         raw_cad = lap.get('avg_cadence')
                         l_cad = int(raw_cad * 2) if raw_cad else '--'
                         l_elev = lap.get('total_ascent', 0) * 3.28084 if lap.get('total_ascent') else 0
-                        
-                        report_lines.append(f"{l_num} | {l_dist:.2f}mi | {l_pace}/mi | {l_hr}bpm | {l_cad}spm | +{int(l_elev)}ft")
-                
-                report_lines.append("\\n" + "="*50 + "\\n")
-            
-            # --- 4. ADD CONTEXT & COPY ---
+                        report_lines.append(
+                            f"{l_num} | {l_dist:.2f}mi | {l_pace}/mi | {l_hr}bpm | {l_cad}spm | +{int(l_elev)}ft"
+                        )
+
+                report_lines.append("\n" + "=" * 50 + "\n")
+
             llm_context = """
 === CONTEXT FOR AI COACHING ===
 
@@ -8333,6 +8457,13 @@ HEART RATE RECOVERY (HRR):
 - Higher = better cardiovascular fitness
 - >30: Excellent, 20-30: Good, <20: Poor/fatigued
 
+TRAINING LOAD:
+- Quantifies total physiological stress (duration x HR intensity)
+- <75: Recovery / Easy
+- 75-150: Maintenance / Aerobic
+- 150-300: Productive / Hard
+- >300: Overreaching / Extreme
+
 TRAINING ZONES:
 - 🟢 Green (Peak Efficiency): High EF + Low Decoupling = Your output (Speed) was high relative to your input (Heart Rate)
 - 🟡 Yellow (Base Maintenance): Low EF + Low Decoupling = Building base
@@ -8344,13 +8475,17 @@ FORM METRICS:
 - Vertical Ratio: Lower = less wasted vertical motion
 - GCT Balance: Target 50/50 left/right symmetry
 """
-            full_content = "\\n".join(report_lines) + llm_context
-            
+            full_report = "\n".join(report_lines).strip()
+            full_content = f"{llm_context.strip()}\n\n{full_report}\n"
+
             import pyperclip
             pyperclip.copy(full_content)
-            
-            ui.notify('✅ Analysis Data Copied!', type='positive', close_button=True)
-            
+
+            if target_activity_id:
+                ui.notify('✅ Run Analysis Copied!', type='positive', close_button=True)
+            else:
+                ui.notify('✅ Analysis Data Copied!', type='positive', close_button=True)
+
         except Exception as e:
             ui.notify(f'Error: {str(e)}', type='negative')
             print(f"❌ Error copying to clipboard: {str(e)}")
@@ -8363,7 +8498,7 @@ FORM METRICS:
 # --- STANDALONE FUNCTION FOR IO-BOUND PARSING ---
 def _parse_fit_files_for_clipboard(activity_info_list):
     """
-    Parse FIT files to extract lap data (runs in separate thread via run.io_bound).
+    Parse FIT files to extract lap data + load/zone metrics (runs via run.io_bound).
     
     This runs in a ThreadPool to keep the WebSocket heartbeat alive during
     heavy file I/O operations.
@@ -8372,7 +8507,7 @@ def _parse_fit_files_for_clipboard(activity_info_list):
         activity_info_list: List of dicts with 'path' and 'activity' keys
         
     Returns:
-        List of enhanced lap data (or None for each activity)
+        List of dict payloads with lap_splits and physiology metrics (or None per activity)
     """
     import fitparse
     import pandas as pd
@@ -8383,6 +8518,7 @@ def _parse_fit_files_for_clipboard(activity_info_list):
     for info in activity_info_list:
         try:
             fit_file_path = info['path']
+            activity = info.get('activity') or {}
             
             # Parse FIT file
             fitfile = fitparse.FitFile(fit_file_path)
@@ -8415,6 +8551,7 @@ def _parse_fit_files_for_clipboard(activity_info_list):
             # Extract elevation, cadence, and timestamp streams for GAP and cadence calculation
             elevation_stream = []
             cadence_stream = []
+            hr_stream = []
             timestamps = []
             for record in fitfile.get_messages("record"):
                 vals = record.get_values()
@@ -8430,6 +8567,7 @@ def _parse_fit_files_for_clipboard(activity_info_list):
                     vals.get('enhanced_altitude') or vals.get('altitude')
                 )
                 cadence_stream.append(vals.get('cadence'))
+                hr_stream.append(vals.get('heart_rate'))
             
             # Calculate GAP and average cadence for each lap
             enhanced_laps = []
@@ -8516,7 +8654,17 @@ def _parse_fit_files_for_clipboard(activity_info_list):
                     'avg_cadence': avg_lap_cadence
                 })
             
-            results.append(enhanced_laps)
+            max_hr = activity.get('max_hr') or 185
+            load_zone_metrics = compute_training_load_and_zones(
+                hr_stream,
+                max_hr=max_hr,
+                timestamps=timestamps,
+            )
+
+            results.append({
+                'lap_splits': enhanced_laps,
+                **load_zone_metrics,
+            })
             
         except Exception as e:
             print(f"Error parsing FIT file: {e}")

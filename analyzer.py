@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, List
 import os
 import math
 
-from hr_zones import hr_color_for_value
+from hr_zones import HR_ZONE_ORDER, classify_hr_zone, hr_color_for_value, normalize_max_hr
 
 
 MAP_PAYLOAD_VERSION = 5
@@ -350,6 +350,109 @@ def build_map_payload_from_streams(
         target_segments=target_segments,
     )
 
+
+def _compute_sample_durations_seconds(timestamps, sample_count):
+    """Estimate per-sample durations from timestamps (fallback to 1s cadence)."""
+    if sample_count <= 0:
+        return []
+
+    default_seconds = 1.0
+    durations = [default_seconds] * sample_count
+
+    if not timestamps:
+        return durations
+
+    usable = min(sample_count, len(timestamps))
+    if usable < 2:
+        return durations
+
+    valid_deltas = []
+    for idx in range(1, usable):
+        prev_ts = timestamps[idx - 1]
+        cur_ts = timestamps[idx]
+        if prev_ts is None or cur_ts is None:
+            continue
+        try:
+            delta_seconds = (cur_ts - prev_ts).total_seconds()
+        except Exception:
+            continue
+        if pd.notna(delta_seconds) and delta_seconds > 0:
+            valid_deltas.append(float(delta_seconds))
+
+    if valid_deltas:
+        default_seconds = float(np.median(valid_deltas))
+    default_seconds = max(0.25, min(10.0, default_seconds))
+    durations = [default_seconds] * sample_count
+
+    for idx in range(1, usable):
+        prev_ts = timestamps[idx - 1]
+        cur_ts = timestamps[idx]
+        if prev_ts is None or cur_ts is None:
+            continue
+        try:
+            delta_seconds = float((cur_ts - prev_ts).total_seconds())
+        except Exception:
+            continue
+        if pd.notna(delta_seconds) and delta_seconds > 0:
+            durations[idx] = max(0.25, min(10.0, delta_seconds))
+
+    return durations
+
+
+def compute_training_load_and_zones(hr_stream, max_hr=185, timestamps=None):
+    """
+    Compute TRIMP-style internal load plus time-in-zone totals.
+
+    Returns:
+      {
+        'load_score': float,
+        'zone1_mins': float,
+        'zone2_mins': float,
+        'zone3_mins': float,
+        'zone4_mins': float,
+        'zone5_mins': float,
+        'zone_total_mins': float,
+      }
+    """
+    hr_values = list(hr_stream or [])
+    sample_durations = _compute_sample_durations_seconds(timestamps or [], len(hr_values))
+    max_hr_value = normalize_max_hr(max_hr)
+
+    zone_seconds = {zone: 0.0 for zone in HR_ZONE_ORDER}
+    load_score = 0.0
+
+    for hr_raw, sample_seconds in zip(hr_values, sample_durations):
+        try:
+            hr_value = float(hr_raw)
+        except (TypeError, ValueError):
+            continue
+
+        if hr_value <= 0:
+            continue
+
+        try:
+            duration_seconds = float(sample_seconds)
+        except (TypeError, ValueError):
+            duration_seconds = 1.0
+        duration_seconds = max(0.25, min(10.0, duration_seconds))
+
+        zone_key = classify_hr_zone(hr_value, max_hr_value)
+        zone_seconds[zone_key] += duration_seconds
+
+        hr_ratio = max(0.0, min(1.10, hr_value / max_hr_value))
+        trimp_factor = hr_ratio * 0.64 * math.exp(1.92 * hr_ratio)
+        load_score += trimp_factor * (duration_seconds / 60.0)
+
+    return {
+        'load_score': round(load_score, 1),
+        'zone1_mins': round(zone_seconds['Zone 1'] / 60.0, 2),
+        'zone2_mins': round(zone_seconds['Zone 2'] / 60.0, 2),
+        'zone3_mins': round(zone_seconds['Zone 3'] / 60.0, 2),
+        'zone4_mins': round(zone_seconds['Zone 4'] / 60.0, 2),
+        'zone5_mins': round(zone_seconds['Zone 5'] / 60.0, 2),
+        'zone_total_mins': round(sum(zone_seconds.values()) / 60.0, 2),
+    }
+
 class FitAnalyzer:
     def __init__(self, output_callback=None, progress_callback=None):
         self.output_callback = output_callback or self._default_output
@@ -640,6 +743,12 @@ class FitAnalyzer:
             max_hr = metadata['user_max_hr']
         elif df['hr'].max() > 0:
             max_hr = df['hr'].max()
+
+        load_zone_metrics = compute_training_load_and_zones(
+            df_active['hr'].tolist() if 'hr' in df_active.columns else [],
+            max_hr=max_hr,
+            timestamps=df_active['timestamp'].tolist() if 'timestamp' in df_active.columns else None,
+        )
             
         # --- 4. HRR Analysis ---
         hrr_list = self._calculate_hrr(df)
@@ -748,6 +857,7 @@ class FitAnalyzer:
             'anaerobic_te': round(metadata.get('total_anaerobic_training_effect', 0), 1),
             'te_label': te_label,
             'te_label_color': te_color,
+            **load_zone_metrics,
             # Dynamics (Session averages)
             'avg_vertical_oscillation': round(metadata.get('avg_vertical_oscillation', 0) / 10, 2) if metadata.get('avg_vertical_oscillation') else 0,  # Convert mm to cm
             'avg_stance_time': int(metadata.get('avg_stance_time', 0)),
