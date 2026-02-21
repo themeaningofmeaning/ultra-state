@@ -2120,7 +2120,7 @@ class UltraStateApp:
                                     ui.label('PACE').classes('text-[10px] text-zinc-500 uppercase tracking-wider font-semibold')
                                     ui.label(f"{downhill['avg_pace']}").classes('text-sm text-white font-bold font-mono')
     
-    async def open_activity_detail_modal(self, activity_hash, from_feed=False):
+    async def open_activity_detail_modal(self, activity_hash, from_feed=False, navigation_list=None):
         """
         Open detailed view of an activity.
         FINAL POLISH: 
@@ -2225,9 +2225,73 @@ class UltraStateApp:
 
         with ui.dialog() as detail_dialog:
             detail_dialog.props('transition-show=none transition-hide=none')
-            with ui.card().classes('w-full max-w-[900px] p-0 bg-zinc-950 h-full border border-zinc-800'):
-                # Close button
-                with ui.row().classes('w-full justify-end p-2'):
+            _nav_guard = {'active': True}
+            _nav_idx = -1
+            _has_nav = bool(navigation_list and len(navigation_list) > 1)
+            if _has_nav:
+                try:
+                    _nav_idx = navigation_list.index(activity_hash)
+                except ValueError:
+                    _has_nav = False
+
+            async def _nav_prev():
+                if not _nav_guard['active'] or _nav_idx <= 0:
+                    return
+                _nav_guard['active'] = False
+                detail_dialog.close()
+                await self.open_activity_detail_modal(
+                    navigation_list[_nav_idx - 1],
+                    from_feed=from_feed,
+                    navigation_list=navigation_list
+                )
+
+            async def _nav_next():
+                if not _nav_guard['active'] or not _has_nav or _nav_idx >= len(navigation_list) - 1:
+                    return
+                _nav_guard['active'] = False
+                detail_dialog.close()
+                await self.open_activity_detail_modal(
+                    navigation_list[_nav_idx + 1],
+                    from_feed=from_feed,
+                    navigation_list=navigation_list
+                )
+
+            # Deactivate keyboard when dialog closes normally (X button / backdrop click)
+            _nav_keyboard = None  # Will hold reference to ui.keyboard
+
+            def _on_dialog_close():
+                _nav_guard['active'] = False
+                # Deactivate NiceGUI keyboard handler
+                if _nav_keyboard is not None:
+                    _nav_keyboard.active = False
+                # Remove JS keydown interceptor (bonk prevention)
+                ui.run_javascript('if(window._ultraNavKD){document.removeEventListener("keydown",window._ultraNavKD);window._ultraNavKD=null;}')
+            detail_dialog.on('close', _on_dialog_close)
+
+            with ui.card().classes('w-full max-w-[900px] p-0 bg-zinc-950 h-full border border-zinc-800 relative'):
+                # Header: ◀ prev | position counter | next ▶ | close
+                with ui.row().classes('w-full justify-between items-center p-2 px-3'):
+                    if _has_nav:
+                        with ui.row().classes('items-center gap-1'):
+                            prev_btn = ui.button(
+                                icon='chevron_left', color=None, on_click=_nav_prev
+                            ).props('flat round dense')
+                            prev_btn.style('color: #9ca3af !important;')
+                            if _nav_idx <= 0:
+                                prev_btn.props('disable')
+                                prev_btn.style('opacity: 0.3; color: #9ca3af !important;')
+                            ui.label(f'{_nav_idx + 1} of {len(navigation_list)}').classes(
+                                'text-xs text-zinc-500 font-mono tabular-nums tracking-wider'
+                            )
+                            next_btn = ui.button(
+                                icon='chevron_right', color=None, on_click=_nav_next
+                            ).props('flat round dense')
+                            next_btn.style('color: #9ca3af !important;')
+                            if _nav_idx >= len(navigation_list) - 1:
+                                next_btn.props('disable')
+                                next_btn.style('opacity: 0.3; color: #9ca3af !important;')
+                    else:
+                        ui.element('div')  # Spacer when no navigation
                     close_btn = ui.button(icon='close', on_click=detail_dialog.close, color=None).props('flat round dense')
                     close_btn.style('color: #9ca3af !important;')
 
@@ -2596,6 +2660,30 @@ class UltraStateApp:
                             copy_icon = ui.icon('content_copy').classes('cursor-pointer text-zinc-500 hover:text-white transition-colors duration-200 text-sm')
                             copy_icon.on('click.stop', lambda: self.copy_splits_to_clipboard(enhanced_laps))
                         self.create_lap_splits_table(enhanced_laps)
+
+
+            # --- KEYBOARD NAVIGATION ---
+            if _has_nav:
+                async def _handle_key(e):
+                    if not _nav_guard['active']:
+                        return
+                    if e.key == 'ArrowLeft':
+                        await _nav_prev()
+                    elif e.key == 'ArrowRight':
+                        await _nav_next()
+
+                _nav_keyboard = ui.keyboard(on_key=_handle_key, active=True)
+
+                # Separate JS listener ONLY to preventDefault (suppress macOS bonk sound)
+                ui.run_javascript('''
+                    if(window._ultraNavKD) document.removeEventListener('keydown', window._ultraNavKD);
+                    window._ultraNavKD = function(e) {
+                        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                            e.preventDefault();
+                        }
+                    };
+                    document.addEventListener('keydown', window._ultraNavKD);
+                ''')
 
         detail_dialog.open()
 
@@ -3232,12 +3320,12 @@ class UltraStateApp:
             with ui.column().classes('w-full mb-6'):
                 ui.label('LIBRARY FOLDER').classes('text-[10px] font-bold tracking-wider text-zinc-500 mb-2')
                 with ui.row().classes('w-full bg-zinc-950/50 border border-zinc-700/50 rounded-lg p-3 items-center'):
-                    ui.icon('folder_open').classes('text-zinc-500 text-sm mr-2')
-                    self.library_modal_path_label = ui.label('No folder selected').classes(
+                    self.library_modal_path_icon = ui.icon('folder_open').classes('text-zinc-500 text-sm mr-2')
+                    self.library_modal_path_label = ui.label('⚠ No folder selected').classes(
                         'flex-1 truncate font-mono text-xs text-zinc-300'
                     )
                     self.library_modal_path_label.style('display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;')
-                    self.library_modal_path_tooltip = self.library_modal_path_label.tooltip('No folder selected')
+                    self.library_modal_path_tooltip = self.library_modal_path_label.tooltip('⚠ No folder selected')
 
             self.library_modal_error_label = ui.label('').classes('text-xs text-red-400 mb-4 hidden bg-red-500/10 p-2 rounded-lg w-full border border-red-500/20')
 
@@ -3281,6 +3369,8 @@ class UltraStateApp:
 
     @staticmethod
     def _status_dot_classes(status_name):
+        if status_name == 'setup':
+            return 'text-[10px] text-amber-500'
         if status_name == 'syncing':
             return 'text-[10px] text-amber-300 animate-pulse'
         if status_name == 'error':
@@ -3339,27 +3429,29 @@ class UltraStateApp:
             has_error = bool(root_error or report_failed)
 
             status_name = 'idle'
-            if has_error:
+            if not has_root:
+                status_name = 'setup'
+            elif has_error:
                 status_name = 'error'
             elif status.sync_in_progress:
                 status_name = 'syncing'
             elif has_root:
                 status_name = 'synced'
 
-            status_value = 'Not configured'
+            status_value = '⚠ Setup Library'
             if status_name == 'error':
                 status_value = 'Sync Error'
             elif status_name == 'syncing':
                 status_value = 'Syncing...'
-            elif has_root:
+            elif status_name == 'synced':
                 status_value = 'Synced'
 
-            row_subtitle = 'Not configured'
+            row_subtitle = '⚠ Setup Library'
             if status_name == 'error':
                 row_subtitle = '⚠ Sync Error'
             elif status_name == 'syncing':
                 row_subtitle = 'Syncing...'
-            elif has_root:
+            elif status_name == 'synced':
                 row_subtitle = 'Synced'
 
             summary_text = ''
@@ -3396,19 +3488,21 @@ class UltraStateApp:
             if self.library_status_row_subtitle:
                 self.library_status_row_subtitle.text = row_subtitle
                 self.library_status_row_subtitle.classes(
-                    remove='text-zinc-500 text-zinc-300 text-amber-300 text-red-300 text-emerald-400'
+                    remove='text-zinc-500 text-zinc-300 text-amber-300 text-amber-400 text-red-300 text-emerald-400'
                 )
                 if status_name == 'error':
                     self.library_status_row_subtitle.classes(add='text-red-300')
+                elif status_name == 'setup':
+                    self.library_status_row_subtitle.classes(add='text-amber-400')
                 else:
                     self.library_status_row_subtitle.classes(add='text-zinc-300')
 
             if self.library_status_dot:
-                self.library_status_dot.classes(remove='text-zinc-500 text-amber-300 text-red-400 text-emerald-400 animate-pulse')
+                self.library_status_dot.classes(remove='text-zinc-500 text-amber-300 text-amber-400 text-amber-500 text-red-400 text-emerald-400 animate-pulse')
                 self.library_status_dot.classes(add=self._status_dot_classes(status_name))
 
             if self.library_modal_status_dot:
-                self.library_modal_status_dot.classes(remove='text-zinc-500 text-amber-300 text-red-400 text-emerald-400 animate-pulse')
+                self.library_modal_status_dot.classes(remove='text-zinc-500 text-amber-300 text-amber-400 text-amber-500 text-red-400 text-emerald-400 animate-pulse')
                 self.library_modal_status_dot.classes(add=self._status_dot_classes(status_name))
 
             if self.library_status_row_tooltip:
@@ -3429,13 +3523,26 @@ class UltraStateApp:
                 self.library_modal_summary_label.text = summary_text or ' '
 
             if self.library_modal_path_label:
-                display_path = status.library_root or 'No folder selected'
+                display_path = status.library_root or '⚠ No folder selected'
                 self.library_modal_path_label.text = display_path
+                self.library_modal_path_label.classes(remove='text-zinc-300 text-amber-500')
+                if not has_root:
+                    self.library_modal_path_label.classes(add='text-amber-500')
+                else:
+                    self.library_modal_path_label.classes(add='text-zinc-300')
+                
                 if self.library_modal_path_tooltip:
                     self.library_modal_path_tooltip.text = display_path
 
+            if getattr(self, 'library_modal_path_icon', None):
+                self.library_modal_path_icon.classes(remove='text-zinc-500 text-amber-500')
+                if not has_root:
+                    self.library_modal_path_icon.classes(add='text-amber-500')
+                else:
+                    self.library_modal_path_icon.classes(add='text-zinc-500')
+
             if self.library_modal_error_label:
-                if has_error:
+                if has_error and status_name not in ('setup', 'syncing'):
                     if root_error:
                         error_text = 'Configured library folder is missing or unreadable. Choose a valid folder.'
                     elif report and report.errors:
@@ -3460,6 +3567,7 @@ class UltraStateApp:
                         self.library_modal_change_button.props(add='disable')
                     else:
                         self.library_modal_change_button.props(remove='disable')
+                    self.library_modal_change_button.text = 'Change Folder' if has_root else 'Select Folder'
 
                 if self.library_modal_resync_button:
                     self.library_modal_resync_button.props(remove='loading')
@@ -3475,6 +3583,19 @@ class UltraStateApp:
                         self.library_modal_import_button.props(add='disable')
                     else:
                         self.library_modal_import_button.props(remove='disable')
+                        
+                    # Toggle visual priority based on whether a library root is configured
+                    self.library_modal_import_button.classes(
+                        remove='bg-white bg-zinc-800 hover:bg-zinc-200 hover:bg-zinc-700 text-zinc-900 text-white border-zinc-200 border-zinc-700/50 opacity-50'
+                    )
+                    if has_root:
+                        self.library_modal_import_button.classes(
+                            add='bg-white hover:bg-zinc-200 text-zinc-900 border-zinc-200'
+                        )
+                    else:
+                        self.library_modal_import_button.classes(
+                            add='bg-zinc-800 hover:bg-zinc-700 text-white border-zinc-700/50 opacity-50'
+                        )
 
             report_key = self._sync_report_key(report)
             if report_key and report_key != self._library_last_report_key:
@@ -3549,6 +3670,10 @@ class UltraStateApp:
             self._library_last_report_key = self._sync_report_key(report)
             await self._apply_library_sync_side_effects(report, notify_user=True)
             await self.refresh_library_widget_status()
+            
+            if report and not getattr(report, 'errors', None) and self.library_settings_dialog:
+                self.library_settings_dialog.close()
+                
         except Exception as e:
             ui.notify(f'Failed to set library folder: {e}', type='negative')
         finally:
@@ -3574,6 +3699,10 @@ class UltraStateApp:
             self._library_last_report_key = self._sync_report_key(report)
             await self._apply_library_sync_side_effects(report, notify_user=True)
             await self.refresh_library_widget_status()
+            
+            if report and not getattr(report, 'errors', None) and self.library_settings_dialog:
+                self.library_settings_dialog.close()
+                
         except Exception as e:
             ui.notify(f'Resync failed: {e}', type='negative')
         finally:
@@ -4178,7 +4307,9 @@ root.destroy()
             long_run_threshold = 10.0
         
         with self.feed_container:
-            for d in sorted(self.activities_data, key=lambda x: x.get('date', ''), reverse=True):
+            _feed_sorted = sorted(self.activities_data, key=lambda x: x.get('date', ''), reverse=True)
+            _feed_nav_list = [d.get('db_hash') for d in _feed_sorted if d.get('db_hash')]
+            for d in _feed_sorted:
                 
                 # 1. Determine Border Color based on Cost
                 cost = d.get('decoupling', 0)
@@ -4254,7 +4385,7 @@ root.destroy()
                 )
                 
                 if activity_hash:
-                    card.on('click', lambda h=activity_hash: self.open_activity_detail_modal(h, from_feed=True))
+                    card.on('click', lambda h=activity_hash, nl=_feed_nav_list: self.open_activity_detail_modal(h, from_feed=True, navigation_list=nl))
                 with card:
                     # --- GHOST BUTTON (White Style) ---
                     # Uses generate_copy_for_ai to ensure full data payload
@@ -5484,7 +5615,8 @@ Activity Breakdown: {activity_breakdown}
                     if action == 'analyze':
                         activity_hash = row.get('hash')
                         if activity_hash:
-                            await self.open_activity_detail_modal(activity_hash, from_feed=True)
+                            _table_nav = [r.get('hash') for r in rows if r.get('hash')]
+                            await self.open_activity_detail_modal(activity_hash, from_feed=True, navigation_list=_table_nav)
                     elif action == 'download':
                         await self.download_fit_file(row)
                     elif action == 'delete':

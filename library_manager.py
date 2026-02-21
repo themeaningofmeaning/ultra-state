@@ -415,7 +415,7 @@ class LibraryManager:
                 if override_paths is None:
                     library_root = self._get_setting("library_root")
                     if not library_root:
-                        report.errors.append("Library root is not configured.")
+                        report.errors.append("Library not configured.")
                         report.finished_at = self._utc_now_iso()
                         self._finalize_sync(report, final_status="error")
                         return report
