@@ -109,7 +109,7 @@ class ActivityModal:
           • On completion, hydrates each skeleton container with real content.
         """
         # ── Navigation metadata (no DB needed) ───────────────────────────
-        _nav_guard = {'active': True}
+        _nav_guard = {'active': True, 'keyboard': None}
         _nav_idx   = -1
         _has_nav   = bool(navigation_list and len(navigation_list) > 1)
         if _has_nav:
@@ -141,13 +141,12 @@ class ActivityModal:
                 navigation_list=navigation_list,
             )
 
-        # ── Build skeleton dialog ─────────────────────────────────────────
-        _nav_keyboard = None
-
         def _on_dialog_close():
             _nav_guard['active'] = False
-            if _nav_keyboard is not None:
-                _nav_keyboard.active = False
+            kb = _nav_guard.get('keyboard')
+            if getattr(kb, 'delete', None):
+                try: kb.delete()
+                except Exception: pass
             ui.run_javascript(
                 'if(window._ultraNavKD){'
                 'document.removeEventListener("keydown",window._ultraNavKD);'
@@ -258,14 +257,14 @@ class ActivityModal:
         # ── Keyboard navigation (set up before async fetch) ────────────────
         if _has_nav:
             async def _handle_key(e):
-                if not _nav_guard['active']:
+                if not _nav_guard['active'] or getattr(e.action, 'keyup', False) or getattr(e.action, 'repeat', False):
                     return
                 if e.key == 'ArrowLeft':
                     await _nav_prev()
                 elif e.key == 'ArrowRight':
                     await _nav_next()
 
-            _nav_keyboard = ui.keyboard(on_key=_handle_key, active=True)
+            _nav_guard['keyboard'] = ui.keyboard(on_key=_handle_key, active=True)
             ui.run_javascript(
                 'if(window._ultraNavKD) document.removeEventListener("keydown",window._ultraNavKD);'
                 'window._ultraNavKD = function(e) {'
@@ -955,7 +954,7 @@ class ActivityModal:
                     'border-radius: 8px; box-shadow: 0px 4px 12px rgba(0,0,0,0.4);'
                 ):
                     with ui.row().classes('w-full justify-between items-center mb-2'):
-                        ui.label('TERRAIN CONTEXT').classes('text-lg font-bold text-white')
+                        ui.label('ELEVATION ANALYSIS').classes('text-lg font-bold text-white')
                         terrain_toggle = ui.toggle(
                             ['Cadence', 'Heart Rate', 'Pace'], value='Cadence'
                         ).props('dense rounded toggle-color="grey-8" text-color="white" size="sm" no-caps').classes(
@@ -1067,7 +1066,7 @@ class ActivityModal:
                     if _nav_guard['active']:  # only log if modal is still open
                         print(f"Map fit lifecycle error: {ex}")
                 finally:
-                    if modal_map_card:
+                    if modal_map_card and not getattr(modal_map_card, 'is_deleted', False):
                         modal_map_card.style('opacity: 1; transition: opacity 0.18s ease;')
 
             asyncio.create_task(_fit_modal_map_deterministic())

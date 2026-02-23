@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, List
 import os
 import math
 
-from hr_zones import HR_ZONE_ORDER, classify_hr_zone, hr_color_for_value, normalize_max_hr
+from hr_zones import HR_ZONE_ORDER, HR_ZONE_RANGE_LABELS, classify_hr_zone, hr_color_for_value, normalize_max_hr
 from constants import (
     SUPPORTED_SPORTS,
     FORM_VERDICT,
@@ -951,3 +951,417 @@ class FitAnalyzer:
             res = self.analyze_file(os.path.join(folder_path, f))
             if res: results.append(res)
         return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2 Step 4 — Compute helpers extracted from UltraStateApp
+# These are pure math functions with no app state dependencies.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def calculate_hr_zones(hr_stream, max_hr):
+    """
+    Calculate time spent in each of 5 heart rate zones.
+
+    Args:
+        hr_stream: List of heart rate values (one per second)
+        max_hr: Maximum heart rate for zone calculations
+
+    Returns:
+        Dictionary with zone names as keys and time in minutes as values
+    """
+    # Filter out None values
+    hr_stream = [hr for hr in hr_stream if hr is not None]
+
+    ordered_labels = [HR_ZONE_RANGE_LABELS[zone] for zone in HR_ZONE_ORDER]
+    if not hr_stream:
+        return {label: 0 for label in ordered_labels}
+
+    zone_counts = {zone: 0 for zone in HR_ZONE_ORDER}
+    for hr in hr_stream:
+        zone_counts[classify_hr_zone(hr, max_hr)] += 1
+
+    return {
+        HR_ZONE_RANGE_LABELS[zone]: zone_counts[zone] / 60.0
+        for zone in HR_ZONE_ORDER
+    }
+
+
+
+def calculate_gap_for_laps(lap_data, elevation_stream, timestamps, cadence_stream=None, max_hr=185):
+    """
+    Calculate GAP, Average Cadence, and QUALITY VERDICT for each lap.
+    UPDATED: Now classifies each split as High Quality / Structural / Broken.
+    """
+    from analyzer import minetti_cost_of_running
+
+    enhanced_laps = []
+
+    for lap in lap_data:
+        # Skip if lap has no valid data
+        if not lap.get('start_time') or not lap.get('total_elapsed_time'):
+            enhanced_laps.append({
+                **lap,
+                'gap_pace': '--:--', 'actual_pace': '--:--',
+                'is_steep': False, 'avg_gradient': 0, 'avg_cadence': None,
+                'split_verdict': 'STRUCTURAL' # Default
+            })
+            continue
+        
+        # Calculate avg_speed if not available
+        avg_speed = lap.get('avg_speed')
+        if avg_speed is None or avg_speed == 0:
+            distance = lap.get('distance', 0)
+            elapsed_time = lap.get('total_elapsed_time', 0)
+            if distance > 0 and elapsed_time > 0:
+                avg_speed = distance / elapsed_time
+            else:
+                avg_speed = 0
+
+        # Calculate average gradient & cadence for this lap
+        lap_start = lap['start_time']
+        lap_end = lap_start + pd.Timedelta(seconds=lap['total_elapsed_time'])
+
+        lap_elevations = []
+        lap_cadences = []
+
+        for i, ts in enumerate(timestamps):
+            if ts is None: continue
+            if lap_start <= ts <= lap_end:
+                # Elevation
+                if elevation_stream[i] is not None:
+                    if i > 0 and elevation_stream[i-1] is not None:
+                        elev_diff = elevation_stream[i] - elevation_stream[i-1]
+                        dist_diff = avg_speed 
+                        if dist_diff is not None and dist_diff > 0:
+                            gradient = elev_diff / dist_diff
+                            lap_elevations.append(gradient)
+                # Cadence
+                if cadence_stream and i < len(cadence_stream) and cadence_stream[i] is not None:
+                    lap_cadences.append(cadence_stream[i])
+
+        # Averages
+        avg_gradient = sum(lap_elevations) / len(lap_elevations) if lap_elevations else 0
+        
+        # Double cadence (Garmin 1-foot to 2-foot)
+        if lap_cadences:
+            avg_lap_cadence = (sum(lap_cadences) / len(lap_cadences)) * 2
+        else:
+            avg_lap_cadence = 0
+
+        # --- THE NEW CLASSIFICATION LOGIC ---
+        # We classify this specific mile/lap based on the same logic as the graph
+        lap_hr = lap.get('avg_hr', 0)
+        split_verdict = classify_split(avg_lap_cadence, lap_hr, max_hr, avg_gradient * 100)
+        # ------------------------------------
+
+        # Minetti / GAP Logic
+        flat_cost = 3.6
+        terrain_cost = minetti_cost_of_running(avg_gradient)
+        cost_multiplier = terrain_cost / flat_cost
+
+        if avg_speed and avg_speed > 0:
+            gap_speed = avg_speed * cost_multiplier
+            gap_pace_min = 26.8224 / gap_speed
+            gap_pace_str = f"{int(gap_pace_min)}:{int((gap_pace_min % 1) * 60):02d}"
+
+            actual_pace_min = 26.8224 / avg_speed
+            actual_pace_str = f"{int(actual_pace_min)}:{int((actual_pace_min % 1) * 60):02d}"
+            
+            pace_diff_seconds = abs(gap_pace_min - actual_pace_min) * 60
+            is_steep = pace_diff_seconds > 15
+        else:
+            gap_pace_str = "--:--"
+            actual_pace_str = "--:--"
+            is_steep = False
+
+        enhanced_laps.append({
+            **lap,
+            'gap_pace': gap_pace_str,
+            'actual_pace': actual_pace_str,
+            'is_steep': is_steep,
+            'avg_gradient': avg_gradient,
+            'avg_cadence': avg_lap_cadence,
+            'split_verdict': split_verdict # <--- STORED HERE
+        })
+
+    return enhanced_laps
+
+
+
+def calculate_aerobic_decoupling(hr_stream, speed_stream):
+    """
+    Calculate aerobic decoupling (Pa:HR) by comparing first and second half efficiency.
+
+    Args:
+        hr_stream: List of heart rate values
+        speed_stream: List of speed values (m/s)
+
+    Returns:
+        Dictionary containing:
+        - decoupling_pct: float - percentage decoupling
+        - ef_first_half: float - efficiency factor for first half
+        - ef_second_half: float - efficiency factor for second half
+        - status: str - 'Solid', 'Drift Detected', or 'Significant Drift'
+        - color: str - hex color code for display
+    """
+    # Filter out None values and create paired data
+    # Use speed > 1.0 to match analyzer.py's df_active filter
+    paired_data = [
+        (hr, speed)
+        for hr, speed in zip(hr_stream, speed_stream)
+        if hr is not None and speed is not None and speed > 1.0
+    ]
+
+    if len(paired_data) < 60:  # Need at least 1 minute of data
+        return {
+            'decoupling_pct': 0,
+            'ef_first_half': 0,
+            'ef_second_half': 0,
+            'status': 'Insufficient Data',
+            'color': '#888888'
+        }
+
+    # Split into halves
+    mid_point = len(paired_data) // 2
+    first_half = paired_data[:mid_point]
+    second_half = paired_data[mid_point:]
+
+    # Calculate efficiency factor for each half (speed / HR)
+    ef_first = sum(speed / hr for hr, speed in first_half) / len(first_half)
+    ef_second = sum(speed / hr for hr, speed in second_half) / len(second_half)
+
+    # Calculate decoupling percentage
+    # Formula: ((EF_first - EF_second) / EF_first) * 100
+    # Positive value means efficiency decreased (drift occurred)
+    if ef_first > 0:
+        decoupling_pct = ((ef_first - ef_second) / ef_first) * 100
+    else:
+        decoupling_pct = 0
+
+    # Determine status and color
+    if decoupling_pct < 5:
+        status = 'Solid'
+        color = '#10B981'  # Green
+    elif decoupling_pct <= 10:
+        status = 'Drift Detected'
+        color = '#ff9900'  # Orange
+    else:
+        status = 'Significant Drift'
+        color = '#ff4d4d'  # Red
+
+    return {
+        'decoupling_pct': round(decoupling_pct, 2),
+        'ef_first_half': round(ef_first, 4),
+        'ef_second_half': round(ef_second, 4),
+        'status': status,
+        'color': color
+    }
+
+
+
+def calculate_run_walk_stats(cadence_stream, speed_stream, hr_stream):
+    """
+    Calculate run/walk/stop statistics for ultra strategy analysis.
+    
+    Args:
+        cadence_stream: List of cadence values (steps per minute)
+        speed_stream: List of speed values (m/s)
+        hr_stream: List of heart rate values
+        
+    Returns:
+        Dictionary containing:
+        - run_pct: float - percentage of time running
+        - hike_pct: float - percentage of time hiking
+        - stop_pct: float - percentage of time stopped
+        - avg_run_pace: str - average running pace (min/mi)
+        - avg_hike_pace: str - average hiking pace (min/mi)
+        - avg_run_hr: int - average heart rate while running
+        - avg_hike_hr: int - average heart rate while hiking
+    """
+    import numpy as np
+    import pandas as pd
+    
+    # Convert to pandas Series for easier handling
+    cadence_series = pd.Series(cadence_stream)
+    speed_series = pd.Series(speed_stream)
+    hr_series = pd.Series(hr_stream)
+    
+    # Step A: Handle Missing Data - Forward fill to handle smart recording gaps
+    cadence_series = cadence_series.replace(0, np.nan).ffill()
+    speed_series = speed_series.replace(0, np.nan).ffill()
+    hr_series = hr_series.ffill()
+    
+    # Drop any remaining NaN values
+    valid_mask = cadence_series.notna() & speed_series.notna() & hr_series.notna()
+    cadence_clean = cadence_series[valid_mask].values
+    speed_clean = speed_series[valid_mask].values
+    hr_clean = hr_series[valid_mask].values
+    
+    if len(cadence_clean) < 60:  # Need at least 1 minute
+        return {
+            'run_pct': 0,
+            'hike_pct': 0,
+            'stop_pct': 0,
+            'avg_run_pace': '--:--',
+            'avg_hike_pace': '--:--',
+            'avg_run_hr': 0,
+            'avg_hike_hr': 0
+        }
+    
+    # Step B: Auto-Detect Units (RPM vs SPM)
+    # If 95th percentile is < 110, assume single-sided (RPM) and multiply by 2
+    cadence_95th = np.percentile(cadence_clean, 95)
+    if cadence_95th < 110:
+        cadence_clean = cadence_clean * 2
+    
+    # Step C: Classify with refined thresholds
+    stopped_count = 0
+    hiking_count = 0
+    running_count = 0
+    
+    run_speeds = []
+    run_hrs = []
+    hike_speeds = []
+    hike_hrs = []
+    
+    for i in range(len(cadence_clean)):
+        speed = speed_clean[i]
+        cadence = cadence_clean[i]
+        hr = hr_clean[i]
+        
+        if speed < 0.5:  # Idle (standing still or very slow walk)
+            stopped_count += 1
+        elif cadence < 135:  # Hiking (low cadence but moving)
+            hiking_count += 1
+            hike_speeds.append(speed)
+            hike_hrs.append(hr)
+        else:  # Running (cadence >= 135)
+            running_count += 1
+            run_speeds.append(speed)
+            run_hrs.append(hr)
+    
+    total = len(cadence_clean)
+    
+    # Calculate percentages
+    run_pct = (running_count / total) * 100 if total > 0 else 0
+    hike_pct = (hiking_count / total) * 100 if total > 0 else 0
+    stop_pct = (stopped_count / total) * 100 if total > 0 else 0
+    
+    # Calculate average paces
+    if run_speeds:
+        avg_run_speed = np.mean(run_speeds)
+        avg_run_pace_min = 26.8224 / avg_run_speed  # Convert to min/mile
+        avg_run_pace = f"{int(avg_run_pace_min)}:{int((avg_run_pace_min % 1) * 60):02d}"
+        avg_run_hr = int(np.mean(run_hrs))
+    else:
+        avg_run_pace = '--:--'
+        avg_run_hr = 0
+    
+    if hike_speeds:
+        avg_hike_speed = np.mean(hike_speeds)
+        avg_hike_pace_min = 26.8224 / avg_hike_speed
+        avg_hike_pace = f"{int(avg_hike_pace_min)}:{int((avg_hike_pace_min % 1) * 60):02d}"
+        avg_hike_hr = int(np.mean(hike_hrs))
+    else:
+        avg_hike_pace = '--:--'
+        avg_hike_hr = 0
+    
+    return {
+        'run_pct': round(run_pct, 1),
+        'hike_pct': round(hike_pct, 1),
+        'stop_pct': round(stop_pct, 1),
+        'avg_run_pace': avg_run_pace,
+        'avg_hike_pace': avg_hike_pace,
+        'avg_run_hr': avg_run_hr,
+        'avg_hike_hr': avg_hike_hr
+    }
+
+
+
+def calculate_terrain_stats(elevation_stream, hr_stream, speed_stream, timestamps):
+    """
+    Calculate terrain efficiency statistics (uphill/flat/downhill).
+    
+    Args:
+        elevation_stream: List of elevation values (meters)
+        hr_stream: List of heart rate values
+        speed_stream: List of speed values (m/s)
+        timestamps: List of timestamps
+        
+    Returns:
+        Dictionary containing stats for uphill, flat, and downhill:
+        - time_pct: percentage of time
+        - avg_hr: average heart rate
+        - avg_pace: average pace (min/mi)
+    """
+    import numpy as np
+    
+    # Filter and align data
+    valid_data = []
+    for i in range(1, len(elevation_stream)):
+        if (elevation_stream[i] is not None and 
+            elevation_stream[i-1] is not None and
+            hr_stream[i] is not None and 
+            speed_stream[i] is not None and
+            speed_stream[i] > 0.2):  # Filter out stopped periods
+            
+            # Calculate grade
+            elev_diff = elevation_stream[i] - elevation_stream[i-1]
+            speed = speed_stream[i]
+            dist_diff = speed  # Approximate distance (1 second * speed)
+            
+            if dist_diff > 0:
+                grade = (elev_diff / dist_diff) * 100  # Convert to percentage
+                valid_data.append({
+                    'grade': grade,
+                    'hr': hr_stream[i],
+                    'speed': speed
+                })
+    
+    if len(valid_data) < 60:  # Need at least 1 minute
+        return {
+            'uphill': {'time_pct': 0, 'avg_hr': 0, 'avg_pace': '--:--'},
+            'flat': {'time_pct': 0, 'avg_hr': 0, 'avg_pace': '--:--'},
+            'downhill': {'time_pct': 0, 'avg_hr': 0, 'avg_pace': '--:--'}
+        }
+    
+    # Apply 10-second rolling average to smooth GPS noise
+    grades = np.array([d['grade'] for d in valid_data])
+    window_size = min(10, len(grades))
+    smoothed_grades = np.convolve(grades, np.ones(window_size)/window_size, mode='same')
+    
+    # Update grades with smoothed values
+    for i, d in enumerate(valid_data):
+        d['grade'] = smoothed_grades[i]
+    
+    # Bucket data
+    uphill_data = [d for d in valid_data if d['grade'] > 3]
+    flat_data = [d for d in valid_data if -3 <= d['grade'] <= 3]
+    downhill_data = [d for d in valid_data if d['grade'] < -3]
+    
+    total = len(valid_data)
+    
+    def calc_stats(data):
+        if not data:
+            return {'time_pct': 0, 'avg_hr': 0, 'avg_pace': '--:--'}
+        
+        time_pct = (len(data) / total) * 100
+        avg_hr = int(np.mean([d['hr'] for d in data]))
+        avg_speed = np.mean([d['speed'] for d in data])
+        avg_pace_min = 26.8224 / avg_speed
+        avg_pace = f"{int(avg_pace_min)}:{int((avg_pace_min % 1) * 60):02d}"
+        
+        return {
+            'time_pct': round(time_pct, 1),
+            'avg_hr': avg_hr,
+            'avg_pace': avg_pace
+        }
+    
+    return {
+        'uphill': calc_stats(uphill_data),
+        'flat': calc_stats(flat_data),
+        'downhill': calc_stats(downhill_data)
+    }
+
+
+
