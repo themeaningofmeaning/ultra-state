@@ -62,6 +62,7 @@ from components.cards import (
     create_running_dynamics_card, create_strategy_row, create_lap_splits_table,
 )
 from components.charts import create_hr_zone_chart, build_terrain_graph
+from components.run_card import create_run_card
 from analyzer import (
     calculate_hr_zones, calculate_gap_for_laps, calculate_aerobic_decoupling,
     calculate_run_walk_stats, calculate_terrain_stats,
@@ -1676,12 +1677,6 @@ class UltraStateApp:
         # The LLM safety lock is applied inside refresh_data_view itself.
         self.state.timeframe = e.value
     
-    @staticmethod
-    def hex_to_rgb(hex_color):
-        """Convert #RRGGBB to 'R, G, B' string for CSS variables."""
-        hex_color = hex_color.lstrip('#')
-        return f"{int(hex_color[0:2], 16)}, {int(hex_color[2:4], 16)}, {int(hex_color[4:6], 16)}"
-
     def update_report_text(self):
         """Update report with Beautiful Cards. Fully restored styling."""
         self.feed_container.clear()
@@ -1703,243 +1698,29 @@ class UltraStateApp:
         with self.feed_container:
             _feed_sorted = sorted(self.activities_data, key=lambda x: x.get('date', ''), reverse=True)
             _feed_nav_list = [d.get('db_hash') for d in _feed_sorted if d.get('db_hash')]
-            for d in _feed_sorted:
-                
-                # 1. Determine Border Color based on Cost
-                cost = d.get('decoupling', 0)
-                border_color = 'border-green-500' if cost <= 5 else 'border-red-500'
-                
-                # 2. Parse date string
-                date_str = d.get('date', '')
-                try:
-                    from datetime import datetime
-                    dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
-                    formatted_date = dt.strftime('%a, %b %-d')
-                    formatted_time = dt.strftime('%-I:%M %p')
-                except:
-                    formatted_date = date_str
-                    formatted_time = ''
-                
-                # 3. Classify run type
-                run_type_tag = self.classify_run_type(d, long_run_threshold)
-                
-                # 3.5. Calculate Strain Score
-                moving_time_min = d.get('moving_time_min', 0)
-                avg_hr = d.get('avg_hr', 0)
-                max_hr = d.get('max_hr', 185)
-                
-                intensity = avg_hr / max_hr if max_hr > 0 else 0
-                
-                if intensity < 0.65: factor = 1.0
-                elif intensity < 0.75: factor = 1.5
-                elif intensity < 0.85: factor = 3.0
-                elif intensity < 0.92: factor = 6.0
-                else: factor = 10.0
-                
-                strain = int(moving_time_min * factor)
-                
-                if strain < 75:
-                    strain_label, strain_color, strain_text_color = LOAD_CATEGORY.RECOVERY, LOAD_CATEGORY_COLORS[LOAD_CATEGORY.RECOVERY], LOAD_CATEGORY_COLORS[LOAD_CATEGORY.RECOVERY]
-                elif strain < 150:
-                    strain_label, strain_color, strain_text_color = LOAD_CATEGORY.BASE, LOAD_CATEGORY_COLORS[LOAD_CATEGORY.BASE], LOAD_CATEGORY_COLORS[LOAD_CATEGORY.BASE]
-                elif strain < 300:
-                    strain_label, strain_color, strain_text_color = LOAD_CATEGORY.OVERLOAD, LOAD_CATEGORY_COLORS[LOAD_CATEGORY.OVERLOAD], LOAD_CATEGORY_COLORS[LOAD_CATEGORY.OVERLOAD]
-                else:
-                    strain_label, strain_color, strain_text_color = LOAD_CATEGORY.OVERREACHING, LOAD_CATEGORY_COLORS[LOAD_CATEGORY.OVERREACHING], LOAD_CATEGORY_COLORS[LOAD_CATEGORY.OVERREACHING]
-                
-                # 4. Create the "Hot Card" with Dark Glass styling
-                # Generate CSS variables for this specific card's theme
-                
-                # Helper to convert hex to rgba-like string for our CSS variables
-                # Note: We are constructing the hex+alpha strings directly as requested
-                # Helper to convert hex to rgba-like string for our CSS variables
-                
-                strain_bg = f"{strain_color}26"          # 15%
-                strain_border = f"{strain_color}4D"      # 30%
-                strain_border_hover = f"{strain_color}80"# 50%
-                strain_shadow = f"{strain_color}1A"      # 10%
-                strain_shadow_hover = f"{strain_color}33"# 20%
-                
-                # Convert strain_color to RGB triplet for dynamic shadow
-                strain_rgb = self.hex_to_rgb(strain_color)
-                
-                activity_hash = d.get('db_hash')
-                
-                # Apply the .glass-card AND .interactive-card classes
-                card = ui.card().classes(
-                    'w-full p-4 glass-card interactive-card cursor-pointer relative overflow-hidden group'
-                ).style(
-                    f'max-width: 720px; margin: 0 auto; '
-                    f'--theme-color-rgb: {strain_rgb}; ' # Inject RGB triplet for hover shadow
-                    f'--strain-bg: {strain_bg}; '
-                    f'--strain-border: {strain_border}; '
-                    f'--strain-border-hover: {strain_border_hover}; '
-                    f'--strain-shadow: {strain_shadow}; '
-                    f'--strain-shadow-hover: {strain_shadow_hover};'
+            card_callbacks = {
+                'on_click': lambda activity_hash, nav_list: self.open_activity_detail_modal(
+                    activity_hash,
+                    from_feed=True,
+                    navigation_list=nav_list,
+                ),
+                'on_copy': lambda activity_hash: self.generate_copy_for_ai(target_activity_id=activity_hash),
+                'on_te_info': self.show_training_effect_info,
+                'on_eff_info': lambda verdict: self.show_aerobic_efficiency_info(highlight_verdict=verdict),
+                'on_load_info': self.show_load_info,
+                'on_form_info': lambda verdict: self.show_form_info(highlight_verdict=verdict),
+            }
+
+            for activity in _feed_sorted:
+                create_run_card(
+                    activity,
+                    avg_ef=avg_ef,
+                    long_run_threshold=long_run_threshold,
+                    navigation_list=_feed_nav_list,
+                    classify_run_type_cb=self.classify_run_type,
+                    classify_aerobic_verdict_cb=self.classify_single_run_aerobic_verdict,
+                    callbacks=card_callbacks,
                 )
-                
-                if activity_hash:
-                    card.on('click', lambda h=activity_hash, nl=_feed_nav_list: self.open_activity_detail_modal(h, from_feed=True, navigation_list=nl))
-                with card:
-                    # --- GHOST BUTTON (White Style) ---
-                    # Uses generate_copy_for_ai to ensure full data payload
-                    
-                    # Container for Ghost Button
-                    with ui.element('div').classes(
-                        'absolute top-3 right-3 z-30 '
-                        'opacity-0 group-hover:opacity-50 '
-                        'hover:!opacity-100 hover:scale-110 hover:rotate-12 '
-                        'transition-all duration-200 cursor-pointer bg-transparent rounded-full'
-                    ).on('click.stop', lambda e, h=d.get('db_hash'): self.generate_copy_for_ai(target_activity_id=h)) as btn_host:
-                        ui.tooltip('Copy Analysis to AI').classes('bg-zinc-800 text-xs font-bold shadow-lg')
-                        ui.icon('auto_awesome', size='28px').classes('text-white')
-
-                    with ui.column().classes('w-full gap-1'):
-                        # --- ROW 1: Header ---
-                        with ui.row().classes('w-full items-start pr-10'):
-                            with ui.column().classes('gap-0'):
-                                ui.label(formatted_date).classes('font-bold text-zinc-200 text-sm group-hover:text-white transition-colors')
-                                ui.label(formatted_time).classes('text-xs text-zinc-500 group-hover:text-zinc-400 transition-colors')
-                        
-                        # --- ROW 2: Context Tags ---
-                        with ui.row().classes('w-full items-center gap-2 mt-2'):
-                            for tag in run_type_tag.split(' | '):
-                                ui.label(tag).classes(
-                                    'text-[10px] font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 tracking-wide '
-                                    'cursor-pointer hover:brightness-125 hover:-translate-y-px hover:shadow-lg transition-all duration-200'
-                                )
-                            
-                            # --- UPDATED CHECK ---
-                            # Check if the label exists AND is not the string "None"
-                            te_label = d.get('te_label')
-                            if te_label and str(te_label) != "None":
-                                te_color = d.get('te_label_color', 'text-zinc-400')
-                                
-                                # Determine styling based on color class
-                                if 'text-purple-400' in te_color: bg_color, border_color = 'bg-purple-500/10', 'border-purple-500/30'
-                                elif 'text-red-400' in te_color: bg_color, border_color = 'bg-red-500/10', 'border-red-500/30'
-                                elif 'text-orange-400' in te_color: bg_color, border_color = 'bg-orange-500/10', 'border-orange-500/30'
-                                elif 'text-emerald-400' in te_color: bg_color, border_color = 'bg-emerald-500/10', 'border-emerald-500/30'
-                                elif 'text-blue-400' in te_color: bg_color, border_color = 'bg-blue-500/10', 'border-blue-500/30'
-                                else: bg_color, border_color = 'bg-zinc-800', 'border-zinc-700'
-                                
-                                text_color = te_color.split()[0] if ' ' in te_color else te_color
-                                
-                                physio_tag = ui.label(te_label).classes(
-                                    f"text-[10px] font-bold px-2 py-0.5 rounded {bg_color} border {border_color} {text_color} "
-                                    "tracking-wide cursor-pointer hover:brightness-125 transition-all"
-                                )
-                                physio_tag.on('click.stop', lambda t=te_label: self.show_training_effect_info(t))
-
-                        # --- ROW 3: Main Metrics Grid ---
-                        with ui.row().classes('w-full gap-4 mb-1 items-center mt-3'):
-                            with ui.column().classes('flex-1'):
-                                with ui.grid(columns=3).classes('w-full gap-3'):
-                                    # Distance
-                                    with ui.column().classes('gap-0').style('line-height: 1.1;'):
-                                        with ui.row().classes('items-center gap-1'):
-                                            ui.icon('straighten').classes('text-blue-400 text-xs')
-                                            ui.label('DISTANCE').classes('text-[10px] text-gray-500 font-bold tracking-wider')
-                                        ui.label(f"{d.get('distance_mi', 0):.1f} mi").classes('text-lg font-bold').style('line-height: 1;')
-                                    
-                                    # Elevation
-                                    with ui.column().classes('gap-0').style('line-height: 1.1;'):
-                                        with ui.row().classes('items-center gap-1'):
-                                            ui.icon('terrain').classes('text-green-400 text-xs')
-                                            ui.label('ELEVATION').classes('text-[10px] text-gray-500 font-bold tracking-wider')
-                                        ui.label(f"{d.get('elevation_ft', 0)} ft").classes('text-lg font-bold').style('line-height: 1;')
-                                    
-                                    # Pace
-                                    with ui.column().classes('gap-0').style('line-height: 1.1;'):
-                                        with ui.row().classes('items-center gap-1'):
-                                            ui.icon('speed').classes('text-purple-400 text-xs')
-                                            ui.label('PACE').classes('text-[10px] text-gray-500 font-bold tracking-wider')
-                                        ui.label(d.get('pace', '--')).classes('text-lg font-bold').style('line-height: 1;')
-                            
-                            ui.element('div').classes('h-full').style('width: 1px; background-color: #27272a; margin: 0 8px;')
-                            
-                            with ui.column().classes('items-center justify-center gap-1 mr-2'):
-                                with ui.element('div').classes('relative'):
-                                    ui.circular_progress(value=min(strain/500, 1.0), size='80px', color=strain_color, show_value=False)
-                                    with ui.element('div').classes('absolute inset-0 flex items-center justify-center'):
-                                        ui.label(str(strain)).classes('text-xl font-bold')
-                                with ui.row().classes('items-center gap-1'):
-                                    ui.icon('help_outline').classes('text-zinc-600 hover:text-white text-[10px] cursor-pointer').on('click.stop', lambda: self.show_load_info())
-                                    ui.label('LOAD:').classes('text-xs text-zinc-300 font-bold uppercase tracking-widest')
-                                    ui.label(strain_label).classes(f'text-sm font-bold').style(f'color: {strain_text_color};')
-
-                        # --- ROW 4: Footer ---
-                        ui.separator().classes('my-1').style('background-color: #52525b; height: 1px;')
-                        with ui.row().classes('w-full justify-between items-center'):
-                            with ui.row().classes('gap-6'):
-                                # Calories
-                                with ui.column().classes('items-center gap-0'):
-                                    ui.label('CALORIES').classes('text-xs text-gray-500 font-bold tracking-wider mb-0.5')
-                                    with ui.row().classes('items-center gap-1'):
-                                        ui.label(f"🔥 {int(d.get('calories') or 0)} cal").classes('text-sm font-bold text-white')
-
-                                # Avg HR
-                                with ui.column().classes('items-center gap-0'):
-                                    ui.label('AVG HR').classes('text-xs text-gray-500 font-bold tracking-wider mb-0.5')
-                                    with ui.row().classes('items-center gap-1'):
-                                        ui.icon('favorite').classes('text-pink-400 text-sm')
-                                        ui.label(f"{d.get('avg_hr', 0)}").classes('text-sm font-bold text-white')
-                                
-                                # Cadence
-                                with ui.column().classes('items-center gap-0'):
-                                    ui.label('CADENCE').classes('text-xs text-gray-500 font-bold tracking-wider mb-0.5')
-                                    with ui.row().classes('items-center gap-1'):
-                                        ui.icon('directions_run').classes('text-blue-400 text-sm')
-                                        ui.label(f"{d.get('avg_cadence', 0)}").classes('text-sm font-bold text-white')
-                            
-                            # Right side: verdict pills
-                            with ui.row().classes('items-center gap-2 flex-wrap'):
-                                # Aerobic Efficiency Verdict Pill
-                                run_ef = d.get('efficiency_factor', 0)
-                                run_cost = d.get('decoupling', 0)
-                                aero_verdict, aero_bg, aero_border, aero_text, aero_icon = self.classify_single_run_aerobic_verdict(
-                                    run_ef,
-                                    run_cost,
-                                    avg_ef=avg_ef,
-                                )
-                                
-                                # Fix Hover: Use explicit bg-opacity instead of brightness to avoid fading issue
-                                hover_bg = aero_bg.replace('/10', '/30') 
-
-                                aero_pill = ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {aero_bg} {aero_border} cursor-pointer hover:{hover_bg} transition-all')
-                                with aero_pill:
-                                    ui.label(aero_icon).classes('text-sm')
-                                    ui.label('Efficiency:').classes(f'text-xs font-bold {aero_text}')
-                                    ui.label(aero_verdict).classes(f'text-xs font-bold {aero_text}')
-                                aero_pill.on('click.stop', lambda av=aero_verdict: self.show_aerobic_efficiency_info(highlight_verdict=av))
-
-                                # Form Status Pill
-                                form = analyze_form(d.get('avg_cadence'), d.get('avg_stance_time'), d.get('avg_step_length'), d.get('avg_vertical_oscillation'))
-                                if form['verdict'] != 'ANALYZING':
-                                    # Match colors to Analyzer.py / Legend
-                                    if form['verdict'] == 'ELITE FORM':
-                                        pill_bg, pill_border, pill_text = 'bg-emerald-500/10', 'border-emerald-700/30', 'text-emerald-400'
-                                    elif form['verdict'] == 'GOOD FORM':
-                                        # Fix: Good Form is Blue in legend/analyzer, not Emerald
-                                        pill_bg, pill_border, pill_text = 'bg-blue-500/10', 'border-blue-700/30', 'text-blue-400'
-                                    elif form['verdict'] == 'HEAVY FEET':
-                                        pill_bg, pill_border, pill_text = 'bg-orange-500/10', 'border-orange-700/30', 'text-orange-400'
-                                    elif form['verdict'] == 'PLODDING':
-                                        # Fix: Plodding is Yellow in legend/analyzer, not Red
-                                        pill_bg, pill_border, pill_text = 'bg-yellow-500/10', 'border-yellow-700/30', 'text-yellow-400'
-                                    elif form['verdict'] == 'HIKING / REST':
-                                        pill_bg, pill_border, pill_text = 'bg-blue-500/10', 'border-blue-700/30', 'text-blue-400'
-                                    else:
-                                        # Fallback for unexpected verdicts
-                                        pill_bg, pill_border, pill_text = 'bg-slate-500/10', 'border-slate-700/30', 'text-slate-400'
-                                    
-                                    form_hover_bg = pill_bg.replace('/10', '/30')
-                                    form_pill = ui.row().classes(f'items-center gap-2 px-3 py-1.5 rounded border {pill_bg} {pill_border} cursor-pointer hover:{form_hover_bg} transition-all')
-                                    with form_pill:
-                                        ui.label('🦶').classes('text-sm')
-                                        ui.label('Form:').classes(f'text-xs font-bold {pill_text}')
-                                        ui.label(form['verdict'].title()).classes(f'text-xs font-bold {pill_text}')
-                                    form_pill.on('click.stop', lambda fv=form['verdict']: self.show_form_info(highlight_verdict=fv))
     
     def show_hrr_info(self):
         """
