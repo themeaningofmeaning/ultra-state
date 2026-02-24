@@ -4,52 +4,25 @@ Garmin FIT Analyzer
 
 # Standard library imports
 import os
-import time
 import json
-import copy
-import hashlib
-import sqlite3
 import asyncio
 import logging
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 
 # Third-party imports
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from nicegui import ui, run
 
 # Local imports
-from analyzer import (
-    FitAnalyzer,
-    analyze_form,
-    classify_split,
-    compute_training_load_and_zones,
-)
 from db import DatabaseManager
 from library_manager import LibraryManager
-from hr_zones import (
-    HR_ZONE_COLORS,
-    HR_ZONE_DESCRIPTIONS,
-    HR_ZONE_MAP_LEGEND_GRADIENT,
-    HR_ZONE_ORDER,
-    HR_ZONE_RANGE_LABELS,
-    classify_hr_zone,
-    classify_hr_zone_by_ratio,
-)
 from constants import (
-    LOAD_CATEGORY,
     LOAD_CATEGORY_COLORS,
-    LOAD_CATEGORY_DESCRIPTIONS,
     LOAD_CATEGORY_EMOJI,
-    LOAD_MIX_VERDICT,
-    SPLIT_BUCKET,
     TE_ICON_MAP,
     DEFAULT_TIMEFRAME,
-    MODAL_TITLES,
-    UI_COPY,
 )
 from state import AppState
 from core.data_manager import DataManager
@@ -311,49 +284,6 @@ class UltraStateApp:
         else:
             self.timeframe_select.props(remove='disable')
 
-    async def get_activity_detail(self, activity_hash):
-        """
-        Thin shim — extracted to ActivityModal._fetch_detail() in Phase 2 Step 3.
-        Kept for backward compatibility with any direct callers.
-        """
-        return await self.activity_modal._fetch_detail(activity_hash)
-
-    def get_training_label(self, aerobic_te, anaerobic_te):
-        """
-        Determine training type label based on Training Effect values.
-        
-        Args:
-            aerobic_te: Aerobic training effect (0.0 - 5.0)
-            anaerobic_te: Anaerobic training effect (0.0 - 5.0)
-            
-        Returns:
-            Dictionary with label, color, and bg_color
-        """
-        if anaerobic_te and anaerobic_te > 2.5:
-            return {
-                'label': 'SPEED / POWER',
-                'color': 'text-purple-400',
-                'bg_color': 'bg-purple-500/10'
-            }
-        elif aerobic_te and aerobic_te > 3.5:
-            return {
-                'label': 'TEMPO / THRESHOLD',
-                'color': 'text-orange-400',
-                'bg_color': 'bg-orange-500/10'
-            }
-        elif aerobic_te and aerobic_te < 2.5:
-            return {
-                'label': 'RECOVERY / BASE',
-                'color': 'text-emerald-400',
-                'bg_color': 'bg-emerald-500/10'
-            }
-        else:
-            return {
-                'label': 'AEROBIC',
-                'color': 'text-blue-400',
-                'bg_color': 'bg-blue-500/10'
-            }
-    
     def copy_splits_to_clipboard(self, lap_data):
         """
         Copy lap splits data to clipboard in CSV format.
@@ -410,22 +340,6 @@ class UltraStateApp:
         except Exception as e:
             ui.notify(f'Error copying splits: {str(e)}', type='negative')
             print(f"Error in copy_splits_to_clipboard: {e}")
-    
-    def create_form_analysis_chart(self, distance_stream, cadence_stream, elevation_stream,
-                                 timestamps=None, vertical_oscillation=None, stance_time=None,
-                                 vertical_ratio=None, step_length=None, use_miles=True):
-        """Legacy wrapper – delegates to _build_terrain_graph with metric='Cadence'."""
-        detail_data = {
-            'distance_stream': distance_stream,
-            'cadence_stream': cadence_stream,
-            'elevation_stream': elevation_stream,
-            'timestamps': timestamps,
-            'vertical_oscillation': vertical_oscillation,
-            'stance_time': stance_time,
-            'vertical_ratio': vertical_ratio,
-            'step_length': step_length,
-        }
-        return build_terrain_graph(detail_data, metric='Cadence', use_miles=use_miles)
     
     def classify_single_run_aerobic_verdict(self, run_ef, run_decoupling, avg_ef=None):
         """
@@ -912,10 +826,6 @@ class UltraStateApp:
         except Exception as e:
             ui.notify(f'Library startup error: {e}', type='warning')
 
-    async def stop_library_services(self):
-        """Stop library manager loop on app shutdown."""
-        await self.library_manager.stop()
-
     @staticmethod
     def _move_file_to_trash(file_path):
         """Best-effort cross-platform move to Trash/Recycle Bin."""
@@ -1239,52 +1149,6 @@ class UltraStateApp:
                     callbacks=card_callbacks,
                 )
     
-    def show_hrr_info(self):
-        """
-        Show informational modal about Heart Rate Recovery.
-        Explains the science, interpretation, and common reasons for low readings.
-        """
-        with ui.dialog() as dialog, ui.card().classes('bg-zinc-900 text-white p-6 max-w-2xl'):
-            # Title
-            ui.label('Heart Rate Recovery (1-Min)').classes('text-xl font-bold mb-4')
-            
-            # Body explanation
-            ui.label('Measures how fast your heart rate drops 60 seconds after pressing STOP. Faster recovery = better aerobic fitness.').classes('text-sm text-gray-300 mb-4')
-            
-            # Scale with color coding
-            ui.label('Interpretation Scale:').classes('text-sm font-bold mb-2')
-            with ui.column().classes('gap-2 mb-4'):
-                with ui.row().classes('items-center gap-2'):
-                    ui.label('🟢').classes('text-lg')
-                    ui.label('> 30 bpm: Excellent').classes('text-sm text-green-400')
-                
-                with ui.row().classes('items-center gap-2'):
-                    ui.label('🟡').classes('text-lg')
-                    ui.label('20-30 bpm: Fair').classes('text-sm text-yellow-400')
-                
-                with ui.row().classes('items-center gap-2'):
-                    ui.label('🔴').classes('text-lg')
-                    ui.label('< 20 bpm: Poor / Fatigue').classes('text-sm text-red-400')
-            # "Why is my number low?" Section
-            ui.separator().classes('my-4 border-zinc-700')
-            ui.label('Why is my number low?').classes('text-lg font-bold mb-3')
-            
-            ui.markdown('''
-**1. The Cooldown Effect (Most Common)**  
-If you jog or walk before pressing stop, your HR is already low, so the drop will be small. This is a "False Low." For a true test, stop your watch immediately after your hardest effort.
-
-**2. Dehydration & Heat**  
-Thicker blood keeps HR elevated after exercise.
-
-**3. Accumulated Fatigue**  
-A sign your body is struggling to recover from recent hard training.
-            ''').classes('text-sm text-gray-300 mb-4')
-            
-            # Close button
-            ui.button('Got it!', on_click=dialog.close).classes('w-full bg-green-600')
-        
-        dialog.open()
-    
     def show_volume_info(self, highlight_verdict=None):
         """
         Show informational modal about the current Volume lens.
@@ -1520,79 +1384,6 @@ A sign your body is struggling to recover from recent hard training.
         
         dialog.open()
 
-    def show_ef_info(self):
-        """
-        Show informational modal about Running Efficiency.
-        Explains what Efficiency means and how to interpret it.
-        """
-        with ui.dialog() as dialog, ui.card().classes('bg-zinc-900 text-white p-6 max-w-2xl'):
-            # Title
-            ui.label('Running Efficiency').classes('text-xl font-bold mb-4')
-            
-            # Body explanation
-            ui.label("Efficiency Factor (Speed / Heart Rate). Measures output per heartbeat. Higher is better.").classes('text-sm text-gray-300 mb-4')
-            
-            # Scale
-            ui.label('Interpretation:').classes('text-sm font-bold mb-2')
-            ui.markdown('''
-📈 **Higher is Better**  
-It means you are running faster at the same heart rate.
-
-**How to Use It:**  
-Compare this number to runs of similar intensity. If your Efficiency is improving over time, your aerobic engine is getting stronger.
-
-**Typical Ranges:**
-- 0.8-1.5: Recreational runners
-- 1.5-2.5+: Elite runners
-            ''').classes('text-sm text-gray-300 mb-4')
-            
-            # Close button
-            ui.button('Got it!', on_click=dialog.close).classes('w-full bg-green-600')
-        
-        dialog.open()
-    
-    def show_cost_info(self):
-        """
-        Show informational modal about Aerobic Decoupling.
-        Explains what Aerobic Decoupling means and how to interpret it.
-        """
-        with ui.dialog() as dialog, ui.card().classes('bg-zinc-900 text-white p-6 max-w-2xl'):
-            # Title
-            ui.label('Aerobic Decoupling').classes('text-xl font-bold mb-4')
-            
-            # Body explanation
-            ui.label("Aerobic Decoupling (Pa:HR). Measures Cardiac Drift—how much HR rises while pace stays steady. Target < 5%.").classes('text-sm text-gray-300 mb-4')
-            
-            # Scale with color coding
-            ui.label('Interpretation Scale:').classes('text-sm font-bold mb-2')
-            with ui.column().classes('gap-2 mb-4'):
-                with ui.row().classes('items-center gap-2'):
-                    ui.label('✅').classes('text-lg')
-                    ui.label('< 5%: Excellent aerobic endurance').classes('text-sm text-green-400')
-                
-                with ui.row().classes('items-center gap-2'):
-                    ui.label('⚠️').classes('text-lg')
-                    ui.label('5-10%: Moderate Drift').classes('text-sm text-yellow-400')
-                
-                with ui.row().classes('items-center gap-2'):
-                    ui.label('🛑').classes('text-lg')
-                    ui.label('> 10%: High Fatigue / Undeveloped Base').classes('text-sm text-red-400')
-            
-            ui.markdown('''
-**What It Means:**  
-Lower is better (<5% is solid). Your heart is working harder to maintain the same output (decoupling). This indicates a need for more aerobic base training or better fueling.
-
-**High Aerobic Decoupling Indicates:**
-- Insufficient aerobic base
-- Running too fast for current fitness
-- Accumulated fatigue from training
-            ''').classes('text-sm text-gray-300 mb-4')
-            
-            # Close button
-            ui.button('Got it!', on_click=dialog.close).classes('w-full bg-green-600')
-        
-        dialog.open()
-    
     def show_aerobic_efficiency_info(self, highlight_verdict=None, from_trends=False):
         """
         Show informational modal explaining Aerobic Efficiency, EF, Decoupling, and all 4 verdicts.
@@ -1864,170 +1655,6 @@ Most of your runs should be Recovery or Base, with Overload efforts 1-2x per wee
         
         dialog.open()
     
-    def format_run_data(self, d, folder_avg_ef=0):
-        """
-        Format single activity data with comprehensive coaching context.
-        
-        This method formats an activity dictionary into a text block with:
-        - Run type classification (stackable tags)
-        - Distance, pace, EF, decoupling, HRR
-        - Enriched metrics (Max HR, Max Speed, Elevation)
-        - Mechanics (Cadence, Form Status)
-        - Physiology (HR Zones, Load Score)
-        - Weather context
-        - Status indicators (✅ Excellent, ⚠️ Moderate, 🛑 High Fatigue)
-        
-        Requirements: 4.4, 4.5, 13.7
-        """
-        # Calculate long run threshold for classification
-        if self.df is not None and len(self.df) >= 5:
-            long_run_threshold = self.df['distance_mi'].quantile(0.8)
-        else:
-            long_run_threshold = 10.0
-        
-        # Get run type classification
-        run_type = self.data_manager.classify_run_type(d, long_run_threshold)
-        
-        # Get training effect label
-        te_label = d.get('te_label', '')
-        
-        # Build type tags
-        type_tags = [run_type]
-        if te_label:
-            type_tags.append(f"🔥 {te_label}")
-        
-        # Add weather tag if available (only if we have real temperature data)
-        temp = d.get('avg_temp')
-        if temp and temp > 0:  # Exclude 0 which indicates missing data
-            temp_f = temp * 9/5 + 32  # Convert C to F
-            if temp_f < 40:
-                type_tags.append(f"🥶 Cold")
-            elif temp_f > 80:
-                type_tags.append(f"🥵 Hot")
-        
-        # Extract enriched metrics
-        max_hr = d.get('max_hr', 0)
-        avg_hr = d.get('avg_hr', 0)
-        max_speed_mph = d.get('max_speed_mph', 0)
-        elevation_ft = d.get('elevation_ft', 0)
-        
-        # Decoupling status
-        decoupling = d.get('decoupling', 0)
-        d_status = ""
-        if decoupling < 5: 
-            d_status = "✅ Excellent"
-        elif decoupling <= 10: 
-            d_status = "⚠️ Moderate"
-        else: 
-            d_status = "🛑 High Fatigue"
-        
-        # EF and HRR
-        ef = d.get('efficiency_factor', 0)
-        hrr_list = d.get('hrr_list', [])
-        hrr_1min = hrr_list[0] if hrr_list and len(hrr_list) > 0 else None
-        hrr_2min = hrr_list[1] if hrr_list and len(hrr_list) > 1 else None
-        hrr_str = f"{hrr_1min}bpm (1min)" if hrr_1min else "--"
-        if hrr_2min:
-            hrr_str += f", {hrr_2min}bpm (2min)"
-        
-        # Duration - convert moving_time_min to HH:MM:SS format
-        moving_time_min = d.get('moving_time_min', 0)
-        if moving_time_min > 0:
-            hours = int(moving_time_min // 60)
-            minutes = int(moving_time_min % 60)
-            seconds = int((moving_time_min % 1) * 60)
-            if hours > 0:
-                duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"
-            else:
-                duration_str = f"{minutes}:{seconds:02d}"
-        else:
-            duration_str = "--"
-        
-        # Mechanics - Form Status
-        cadence = d.get('avg_cadence', 0)
-        gct = d.get('avg_stance_time', 0)  # Ground contact time in ms
-        stride = d.get('avg_step_length', 0)  # Step length in meters
-        bounce = d.get('avg_vertical_oscillation', 0)  # Vertical oscillation in cm
-        
-        form_analysis = analyze_form(cadence, gct, stride, bounce)
-        form_verdict = form_analysis['verdict']
-        
-        # Add form emoji
-        form_emoji = ""
-        if 'ELITE' in form_verdict:
-            form_emoji = "✅"
-        elif 'GOOD' in form_verdict:
-            form_emoji = "👍"
-        elif 'OVERSTRIDING' in form_verdict:
-            form_emoji = "🦶"
-        elif 'PLODDING' in form_verdict or 'HEAVY' in form_verdict:
-            form_emoji = "🐌"
-        elif 'INEFFICIENT' in form_verdict:
-            form_emoji = "⚠️"
-        
-        # Training Effect (Garmin's physiological load metric)
-        training_effect = d.get('training_effect', 0)
-        anaerobic_te = d.get('anaerobic_te', 0)
-        
-        # Power data
-        avg_power = d.get('avg_power', 0)
-        
-        # Activity Breakdown (Run/Walk/Idle)
-        # Note: This is approximate based on moving vs rest time
-        # For accurate breakdown, would need speed stream analysis
-        moving_time = d.get('moving_time_min', 0)
-        rest_time = d.get('rest_time_min', 0)
-        total_time = moving_time + rest_time
-        
-        if total_time > 0:
-            moving_pct = (moving_time / total_time) * 100
-            idle_pct = (rest_time / total_time) * 100
-            # Assume most moving time is running (conservative for trail runs)
-            activity_breakdown = f"Moving {moving_pct:.0f}% | Idle {idle_pct:.0f}%"
-        else:
-            activity_breakdown = "N/A"
-        
-        # Temperature
-        temp_str = ""
-        if temp and temp > 0:  # Only show if we have real temperature data
-            temp_f = temp * 9/5 + 32
-            temp_str = f"{temp_f:.0f}°F"
-        
-        # Build formatted output
-        type_line = " | ".join([f"[{tag}]" for tag in type_tags])
-        
-        return f"""
-RUN: {d.get('date')} {d.get('time', '')}
-Type:       {type_line}
---------------------------------------------------
-SUMMARY
-Dist:       {d.get('distance_mi')} mi
-Time:       {duration_str}
-Pace:       {d.get('pace')} /mi
-Elev Gain:  +{elevation_ft} ft
-Temp:       {temp_str if temp_str else '--'}
-
-PHYSIOLOGY (The Engine)
-Avg HR:     {avg_hr} bpm
-Max HR:     {max_hr} bpm{f'''
-Avg Power:  {avg_power}W''' if avg_power > 0 else ''}
-EF:         {ef:.2f} (Efficiency Factor)
-Decoupling: {decoupling:.2f}% ({d_status})
-HRR:        {hrr_str}
-Training Effect: {training_effect:.1f} Aerobic, {anaerobic_te:.1f} Anaerobic
-
-MECHANICS (The Chassis)
-Avg Cadence: {cadence:.0f} spm
-Form Tag:    [{form_emoji} {form_verdict}]
-Max Speed:   {max_speed_mph:.1f} mph
-Activity Breakdown: {activity_breakdown}
-"""
-
-
-    
-
-
-    
     def update_activities_grid(self):
         """
         Update activities table.
@@ -2205,27 +1832,6 @@ Activity Breakdown: {activity_breakdown}
                 table.props('flat bordered dense dark')
                 table.classes('bg-zinc-900 text-gray-200')
     
-    async def handle_table_request(self, e):
-        """
-        Handle server-side sort requests from the UI table.
-        """
-        # 1. Extract new sort settings from the event
-        pagination = e.args.get('pagination', {})
-        new_sort_by = pagination.get('sortBy')
-        new_descending = pagination.get('descending')
-        
-        # 2. Update App State
-        if new_sort_by:
-            self.state.sort_by = new_sort_by
-            self.state.sort_desc = new_descending
-            
-            # 3. Reload Data (Server-Side Sort)
-            await self.refresh_data_view()
-            
-            # 4. Notify user (Optional polish)
-            direction = "↓" if new_descending else "↑"
-            ui.notify(f"Sorted by {new_sort_by} {direction}", type='info', timeout=1000)
-
     async def download_fit_file(self, row_data):
         """
         Copy the FIT file to the user's Downloads folder.
@@ -2297,62 +1903,6 @@ Activity Breakdown: {activity_breakdown}
             except Exception as e:
                 ui.notify(f'Error deleting activity: {str(e)}', type='negative')
                 print(f"Error in delete_activity_inline: {e}")
-    
-    async def delete_selected_activity(self):
-        """
-        Delete selected activity from grid.
-        
-        This method:
-        - Gets selected row from AG Grid
-        - Shows confirmation dialog
-        - If confirmed, calls DatabaseManager.delete_activity()
-        - Updates runs counter
-        - Calls refresh_data_view()
-        - Shows success notification
-        
-        Requirements: 5.4, 5.5, 5.6, 5.7, 5.8
-        """
-        # Get selected row from AG Grid
-        selected = await self.activities_grid.get_selected_rows()
-        
-        # Check if a row is selected
-        if not selected:
-            ui.notify('No activity selected', type='warning')
-            return
-        
-        # Get the activity hash from the selected row
-        activity_hash = selected[0]['hash']
-        activity_name = selected[0]['filename']
-        file_path = selected[0].get('file_path')
-        
-        # Show confirmation dialog
-        result = await ui.run_javascript(
-            f'confirm("Delete activity: {activity_name}?")', 
-            timeout=10
-        )
-        
-        # If confirmed, delete the activity
-        if result:
-            # Delete from activity + library index and attempt trash.
-            moved, trash_error, resolved_path = self._delete_activity_with_library_cleanup(
-                activity_hash,
-                file_path=file_path,
-            )
-            
-            # Update runs counter
-            self.library_modal.update_run_count()
-            
-            # Call refresh_data_view() to update all views
-            await self.refresh_data_view()
-            
-            # Show success notification
-            if moved:
-                ui.notify('Activity deleted and file moved to Trash', type='positive')
-            elif resolved_path and trash_error:
-                ui.notify('Activity deleted, but file could not be moved to Trash', type='warning')
-            else:
-                ui.notify('Activity deleted successfully', type='positive')
-    
     
     def apply_export_chart_header(self, fig, title, subtitle, verdict=None, badge_color=None, margin=None):
         """Apply static export header with optional inline-styled verdict badge."""
