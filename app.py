@@ -54,6 +54,7 @@ from constants import (
     UI_COPY,
 )
 from state import AppState
+from core.data_manager import DataManager
 from components.activity_modal import ActivityModal
 from components.library_modal import LibraryModal
 from components.analysis_view import AnalysisView
@@ -94,10 +95,8 @@ class UltraStateApp:
         self.state = AppState()
         self.state.session_id = self.db.get_last_session_id()
 
-        # ── Data caches (Tier 2 — NOT in AppState yet) ──────────────────
-        # Deferred to Phase 2 Step 3 (component extraction).
-        self.activities_data = []
-        self.df = None
+        # ── Data lifecycle controller (Phase 3 logic decoupling) ─────────
+        self.data_manager = DataManager(db=self.db, state=self.state)
 
         # ── Focus-mode save/restore (not observed — simple R/W pair) ────
         self.pre_focus_timeframe = DEFAULT_TIMEFRAME
@@ -146,7 +145,7 @@ class UltraStateApp:
             df=self.df,
             activities_data=self.activities_data,
             callbacks={
-                'classify_run_type': self.classify_run_type,
+                'classify_run_type': self.data_manager.classify_run_type,
                 'show_volume_info': self.show_volume_info,
                 'show_aerobic_efficiency_info': self.show_aerobic_efficiency_info,
                 'show_form_info': self.show_form_info,
@@ -172,7 +171,7 @@ class UltraStateApp:
                 'on_focus_selected': self.enter_focus_mode,
                 'on_bulk_download': self.bulk_download,
                 'on_bulk_delete': self.bulk_delete,
-                'classify_run_type': self.classify_run_type,
+                'classify_run_type': self.data_manager.classify_run_type,
             },
         )
         
@@ -224,6 +223,22 @@ class UltraStateApp:
         # Runs 3 seconds after startup so it never competes with initial render.
         from updater import check_and_notify
         ui.timer(3.0, check_and_notify, once=True)
+
+    @property
+    def df(self):
+        return self.data_manager.df
+
+    @df.setter
+    def df(self, value):
+        self.data_manager.df = value
+
+    @property
+    def activities_data(self):
+        return self.data_manager.activities_data
+
+    @activities_data.setter
+    def activities_data(self, value):
+        self.data_manager.activities_data = value or []
 
     def _build_modal_callbacks(self) -> dict:
         """
@@ -1313,17 +1328,11 @@ class UltraStateApp:
             ui.notify("No valid activities selected", type='warning')
             return
 
-        # 2. Filter the main data list in memory
-        self.activities_data = [act for act in self.activities_data if act.get('db_hash') in hashes]
-        
-        # 3. Update DataFrame (Critical for charts to work)
-        if self.activities_data:
-            self.df = pd.DataFrame(self.activities_data)
-            # Ensure date objects exist for the charts
-            if 'date' in self.df.columns:
-                 self.df['date_obj'] = pd.to_datetime(self.df['date'])
-        else:
-             self.df = None
+        # 2. Filter the main data list in memory and rebuild DataFrame cache
+        focused_activities = [act for act in self.activities_data if act.get('db_hash') in hashes]
+        self.data_manager.set_activities_data(focused_activities)
+
+        # 3. Sync extracted views with focused data
         self.analysis_view.set_data(self.df, self.activities_data)
         self.layout.set_data(self.df, self.activities_data)
         self.layout.update_filter_bar()
@@ -1452,21 +1461,7 @@ class UltraStateApp:
         """
         Refresh data using DB-side sorting.
         """
-        # [Keep existing sorting logic...]
-        sort_order = 'desc' if self.state.sort_desc else 'asc'
-
-        self.activities_data = self.db.get_activities(
-            self.state.timeframe, 
-            self.state.session_id,
-            sort_by=self.state.sort_by,
-            sort_order=sort_order
-        )
-        
-        if self.activities_data:
-            self.df = pd.DataFrame(self.activities_data)
-            self.df['date_obj'] = pd.to_datetime(self.df['date'])
-        else:
-            self.df = None
+        self.data_manager.load_data()
         self.analysis_view.set_data(self.df, self.activities_data)
         self.layout.set_data(self.df, self.activities_data)
         
@@ -1561,7 +1556,7 @@ class UltraStateApp:
                     avg_ef=avg_ef,
                     long_run_threshold=long_run_threshold,
                     navigation_list=_feed_nav_list,
-                    classify_run_type_cb=self.classify_run_type,
+                    classify_run_type_cb=self.data_manager.classify_run_type,
                     classify_aerobic_verdict_cb=self.classify_single_run_aerobic_verdict,
                     callbacks=card_callbacks,
                 )
@@ -2213,7 +2208,7 @@ Most of your runs should be Recovery or Base, with Overload efforts 1-2x per wee
             long_run_threshold = 10.0
         
         # Get run type classification
-        run_type = self.classify_run_type(d, long_run_threshold)
+        run_type = self.data_manager.classify_run_type(d, long_run_threshold)
         
         # Get training effect label
         te_label = d.get('te_label', '')
@@ -2366,43 +2361,12 @@ Activity Breakdown: {activity_breakdown}
         self.grid_container.clear()
         
         # --- 1. FILTER LOGIC ---
-        filtered_data = []
         if self.df is not None and len(self.df) >= 5:
             lrt = self.df['distance_mi'].quantile(0.8)
         else:
             lrt = 10.0
 
-        if not self.activities_data:
-            filtered_data = []
-        else:
-            for act in self.activities_data:
-                dist = act.get('distance_mi', 0)
-                
-                # Tags
-                run_tags_set = set()
-                c_tags_str = self.classify_run_type(act, lrt)
-                if c_tags_str:
-                    for t in c_tags_str.split(' | '):
-                        run_tags_set.add(t.replace('⛰️', '').replace('🔥', '').replace('🦅', '').replace('⚡', '').replace('🏃', '').replace('🧘', '').replace('🔷', '').strip())
-                
-                p_tag = act.get('te_label')
-                if p_tag and str(p_tag) != "None": run_tags_set.add(str(p_tag).strip())
-                
-                # Filter Check
-                include = True
-                if self.state.active_filters:
-                    dist_keys = {'short', 'med', 'long_dist', 'all'}
-                    active_tag_filters = {f for f in self.state.active_filters if f not in dist_keys}
-                    
-                    if 'short' in self.state.active_filters and not (dist < 5): include = False
-                    if 'med' in self.state.active_filters and not (5 <= dist <= 10): include = False
-                    if 'long_dist' in self.state.active_filters and not (dist > 10): include = False
-                    
-                    if active_tag_filters and not active_tag_filters.issubset(run_tags_set): 
-                        include = False
-                
-                if include: 
-                    filtered_data.append(act)
+        filtered_data = self.data_manager.get_filtered_data()
 
         # --- EMPTY STATE ---
         if not filtered_data:
@@ -2430,7 +2394,7 @@ Activity Breakdown: {activity_breakdown}
                 n_date, n_time = dt.strftime('%a, %m/%d'), dt.strftime('%I:%M%p').lstrip('0')
             except: n_date, n_time = raw_date, ""
 
-            ts = self.classify_run_type(act, lrt)
+            ts = self.data_manager.classify_run_type(act, lrt)
             te = act.get('te_label')
             tags_str = f"{ts} | {te}" if te and str(te) != "None" else ts
             
@@ -2712,61 +2676,6 @@ Activity Breakdown: {activity_breakdown}
                 ui.notify('Activity deleted successfully', type='positive')
     
     
-    def classify_run_type(self, run_data, long_run_threshold):
-        """
-        Stackable classification system.
-        Uses burst_count to distinguish true workouts from speed outliers.
-        """
-        tags = []
-        
-        # 1. Existing metric extraction
-        distance_mi = run_data.get('distance_mi', 0)
-        avg_hr = run_data.get('avg_hr', 0)
-        max_hr = run_data.get('max_hr', 185)
-        elevation_ft = run_data.get('elevation_ft', 0)
-        avg_temp = run_data.get('avg_temp', 0)
-        burst_count = run_data.get('burst_count', 0) # GET THE COUNT
-        
-        hr_ratio = avg_hr / max_hr if max_hr > 0 else 0
-        grade = (elevation_ft / distance_mi) if distance_mi > 0 else 0
-        
-        # --- A. Primary Category ---
-        if distance_mi > long_run_threshold: primary = "🦅 Long Run"
-        elif distance_mi < 4.0 and hr_ratio < 0.75: primary = "🧘 Recovery"
-        elif hr_ratio > 0.82: primary = "🔥 Tempo"
-        elif hr_ratio > 0.75: primary = "🔷 Steady"
-        else: primary = "🟡 Base"
-        tags.append(primary)
-        
-        # --- B. Attributes ---
-        if grade > 75: tags.append("⛰️ Hilly")
-        
-        # --- C. The New Interval Logic ---
-        # Only tag as Intervals if we saw 3 or more sustained bursts
-        if burst_count >= 4:
-            tags.append("⚡ Intervals")
-        elif burst_count >= 2:
-            # Optional: Add a tag for short speed work like Strides
-            tags.append("💨 Strides")
-            
-        if avg_temp and avg_temp > 25: tags.append("🥵 Hot")
-        elif avg_temp and avg_temp < 5: tags.append("🥶 Cold")
-        
-        return " | ".join(tags)
-    
-    
-
-
-
-
-
-
-
-
-
-
-
-
     def apply_export_chart_header(self, fig, title, subtitle, verdict=None, badge_color=None, margin=None):
         """Apply static export header with optional inline-styled verdict badge."""
         if margin is None:
@@ -2808,141 +2717,18 @@ Activity Breakdown: {activity_breakdown}
     
     
     async def export_csv(self):
-        """
-        Export activities to CSV with AI context - saves to Downloads folder.
-        
-        This method:
-        - Checks if df is None
-        - Exports DataFrame to CSV
-        - Appends data dictionary section
-        - Saves to Downloads folder
-        - Shows success notification with file path
-        
-        Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 13.6
-        """
-        # Check if df is None
+        """Export current data snapshot via DataManager and show UI notifications."""
         if self.df is None or self.df.empty:
             ui.notify('No data to export', type='warning')
             return
-        
+
         try:
-            # Export DataFrame to CSV with specified columns
-            export_columns = [
-                'date',
-                'filename',
-                'distance_mi',
-                'pace',
-                'gap_pace',
-                'moving_time_min',
-                'rest_time_min',
-                'avg_hr',
-                'max_hr',
-                'avg_power',
-                'avg_cadence',
-                'efficiency_factor',
-                'decoupling',
-                'load_score',
-                'zone1_mins',
-                'zone2_mins',
-                'zone3_mins',
-                'zone4_mins',
-                'zone5_mins',
-                'hrr_list',
-                'v_ratio',
-                'gct_balance',
-                'gct_change',
-                'elevation_ft',
-                'avg_resp',
-                'avg_temp',
-            ]
-
-            export_df = self.df.copy()
-            text_columns = {'date', 'filename', 'pace', 'gap_pace', 'hrr_list'}
-            for col in export_columns:
-                if col not in export_df.columns:
-                    export_df[col] = '' if col in text_columns else 0
-
-            # Export to CSV string with stable, parse-safe headers
-            csv_content = export_df[export_columns].to_csv(index=False)
-            
-            # Append data dictionary section
-            data_dictionary = """
-
-=== DATA DICTIONARY FOR AI ANALYSIS ===
-
-EFFICIENCY FACTOR (EF):
-- Normalized graded speed (m/min) divided by heart rate
-- Higher is better - indicates aerobic efficiency
-- Typical range: 0.8-1.5 for recreational runners, 1.5-2.5+ for elite
-
-AEROBIC DECOUPLING:
-- Percentage loss of efficiency from first half to second half of run
-- Lower is better - indicates aerobic durability
-- < 5%: Excellent aerobic fitness
-- 5-10%: Moderate drift, acceptable for long runs
-- > 10%: High fatigue, may indicate overtraining or insufficient base
-
-HEART RATE RECOVERY (HRR):
-- BPM drop 60 seconds after peak efforts
-- Higher is better - indicates cardiovascular fitness
-- > 30 bpm: Excellent recovery
-- 20-30 bpm: Good recovery
-- < 20 bpm: Poor recovery, may indicate fatigue
-
-FORM METRICS:
-- Cadence: Steps per minute (target: 170-180 spm)
-- Vertical Ratio: Vertical oscillation / stride length (lower is better)
-- GCT Balance: Ground contact time balance left/right (target: 50/50)
-- GCT Change: Ground contact time change over run (lower is better)
-
-PACE METRICS:
-- Pace: Actual pace (min/mile)
-- GAP Pace: Grade-adjusted pace accounting for elevation changes
-
-TRAINING ZONES:
-- Green (Peak Efficiency): High EF + Low Decoupling = Your output (Speed) was high relative to your input (Heart Rate)
-- Yellow (Base Maintenance): Low EF + Low Decoupling = Building aerobic base
-- Orange (Expensive Speed): High EF + High Decoupling = Fast but unsustainable
-- Red (Struggling): Low EF + High Decoupling = Fatigue or overtraining
-
-TRAINING LOAD (load_score):
-- TRIMP-style internal load score (duration x HR intensity)
-- < 75: Recovery / Easy
-- 75-150: Base / Aerobic
-- 150-300: Overload / Hard
-- > 300: Overreaching / Extreme
-
-TIME IN ZONES (zone1_mins ... zone5_mins):
-- Minutes spent in each heart-rate zone
-- Zone 1: <60% max HR (Recovery)
-- Zone 2: 60-70% max HR (Endurance)
-- Zone 3: 70-80% max HR (Steady)
-- Zone 4: 80-90% max HR (Threshold)
-- Zone 5: >90% max HR (VO2/Max Effort)
-"""
-            
-            # Combine CSV and data dictionary
-            full_content = csv_content + data_dictionary
-            
-            # Generate filename with timestamp
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"garmin_analysis_{timestamp}.csv"
-            
-            # Save to Downloads folder
-            downloads_path = os.path.expanduser("~/Downloads")
-            file_path = os.path.join(downloads_path, filename)
-            
-            # Write file
-            with open(file_path, 'w') as f:
-                f.write(full_content)
-            
-            # Show success notification with file path
-            ui.notify(f'CSV saved! (check your Downloads folder)', type='positive', timeout=5000)
+            file_path = self.data_manager.export_csv()
+            ui.notify('CSV saved! (check your Downloads folder)', type='positive', timeout=5000)
             print(f"CSV exported to: {file_path}")
-            
+        except ValueError:
+            ui.notify('No data to export', type='warning')
         except Exception as e:
-            # Handle export failure
             ui.notify(f'Error exporting CSV: {str(e)}', type='negative')
             print(f"Error in export_csv: {e}")
             import traceback

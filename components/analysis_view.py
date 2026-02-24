@@ -69,7 +69,50 @@ class AnalysisView:
     def build(self):
         """Build the Trends tab root container."""
         self.build_trends_tab()
+        has_data = self.df is not None and not self.df.empty and bool(self.activities_data)
+        self.plotly_container.clear()
+        if has_data:
+            self.update_trends_chart()
+        else:
+            with self.plotly_container:
+                self._render_skeleton()
         return self.plotly_container
+
+    def _render_skeleton(self):
+        """Render premium shimmer placeholders while trend data is loading."""
+        with ui.column().classes('w-full gap-6'):
+            with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6').style(
+                'border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'
+            ):
+                ui.element('div').classes('animate-pulse bg-zinc-800 rounded-xl h-7 w-56 mb-3')
+                ui.element('div').classes('animate-pulse bg-zinc-800 rounded-lg h-4 w-80 mb-4')
+                with ui.row().classes('w-full gap-2 mb-4'):
+                    ui.element('div').classes('animate-pulse bg-zinc-800 rounded-full h-8 w-24')
+                    ui.element('div').classes('animate-pulse bg-zinc-800 rounded-full h-8 w-24')
+                    ui.element('div').classes('animate-pulse bg-zinc-800 rounded-full h-8 w-24')
+                    ui.element('div').classes('animate-pulse bg-zinc-800 rounded-full h-8 w-32')
+                ui.element('div').classes('animate-pulse bg-zinc-800 rounded-xl h-64 w-full')
+
+            with ui.row().classes('w-full gap-6'):
+                with ui.card().classes('flex-1 bg-zinc-900 border border-zinc-800 p-6').style(
+                    'border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'
+                ):
+                    ui.element('div').classes('animate-pulse bg-zinc-800 rounded-xl h-7 w-52 mb-3')
+                    ui.element('div').classes('animate-pulse bg-zinc-800 rounded-lg h-4 w-64 mb-4')
+                    ui.element('div').classes('animate-pulse bg-zinc-800 rounded-xl h-32 w-full')
+                with ui.card().classes('flex-1 bg-zinc-900 border border-zinc-800 p-6').style(
+                    'border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'
+                ):
+                    ui.element('div').classes('animate-pulse bg-zinc-800 rounded-xl h-7 w-48 mb-3')
+                    ui.element('div').classes('animate-pulse bg-zinc-800 rounded-lg h-4 w-56 mb-4')
+                    ui.element('div').classes('animate-pulse bg-zinc-800 rounded-xl h-32 w-full')
+
+            with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6').style(
+                'border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'
+            ):
+                ui.element('div').classes('animate-pulse bg-zinc-800 rounded-xl h-7 w-44 mb-3')
+                ui.element('div').classes('animate-pulse bg-zinc-800 rounded-lg h-4 w-72 mb-4')
+                ui.element('div').classes('animate-pulse bg-zinc-800 rounded-xl h-64 w-full')
 
     def _invoke_callback(self, name, *args, **kwargs):
         cb = self.callbacks.get(name)
@@ -110,17 +153,36 @@ class AnalysisView:
     async def handle_cadence_click(self, e):
         await self._invoke_callback_async('handle_cadence_click', e)
 
+    def _render_chart_header(self, title, subtitle, on_info_click, verdict_widget=None):
+        """Render a standardized chart header with clickable title/icon and optional verdict widget."""
+        with ui.column().classes('w-full gap-1'):
+            header_row = ui.row().classes('items-center gap-2')
+            with header_row:
+                header_click_target = ui.row().classes('items-center gap-2 cursor-pointer group')
+                if callable(on_info_click):
+                    header_click_target.on('click', lambda: on_info_click())
+                with header_click_target:
+                    ui.label(title).classes('text-xl font-bold text-white')
+                    ui.icon('help_outline').classes(
+                        'text-zinc-500 group-hover:text-white text-lg transition-colors'
+                    )
+
+                rendered_verdict = None
+                if verdict_widget is not None:
+                    if callable(verdict_widget):
+                        rendered_verdict = verdict_widget()
+                    else:
+                        rendered_verdict = verdict_widget
+
+            subtitle_label = ui.label(subtitle).classes('text-sm text-zinc-400 mb-4')
+
+        return header_row, subtitle_label, rendered_verdict
+
     def build_trends_tab(self):
         """Create trends tab with embedded Plotly chart."""
         # Store the plotly_container as an instance variable so it can be updated later
         # Added 'p-4' to match Feed container's padding for perfect vertical alignment
         self.plotly_container = ui.column().classes('w-full p-8').style('min-height: 900px;')
-        
-        with self.plotly_container:
-            # Show placeholder message when no data is available
-            ui.label('No data available. Import activities to view trends.').classes(
-                'text-center text-zinc-400 mt-20'
-            )
 
     def calculate_trend_stats(self, df_subset):
         """
@@ -1347,23 +1409,20 @@ class AnalysisView:
                 
                 if volume_fig:
                     with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
-                        
-                        # Header Row: Title + ❓ Icon + Verdict Badge (INLINE)
-                        with ui.row().classes('w-full items-center gap-2 mb-1'):
-                            ui.label('Training Volume').classes('text-xl font-bold text-white')
-                            
-                            # Verdict Badge
-                            self.volume_verdict_label = ui.label(f'{vol_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}').style(f'color: {vol_color};')
-                            
-                            # Info Icon (inline)
-                            ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-lg transition-colors').on(
-                                'click', lambda: self.show_volume_info(
-                                    highlight_verdict=self.volume_verdict_label.text if hasattr(self, 'volume_verdict_label') else None
+                        _, self.volume_subtitle_label, self.volume_verdict_label = self._render_chart_header(
+                            title='Training Volume',
+                            subtitle=vol_subtitle,
+                            on_info_click=lambda: self.show_volume_info(
+                                highlight_verdict=(
+                                    self.volume_verdict_label.text
+                                    if hasattr(self, 'volume_verdict_label')
+                                    else None
                                 )
-                            )
-                        
-                        # Subtitle (lens-adaptive)
-                        self.volume_subtitle_label = ui.label(vol_subtitle).classes('text-sm text-zinc-400 mb-3')
+                            ),
+                            verdict_widget=lambda: ui.label(f'{vol_verdict}').classes(
+                                f'text-sm font-bold px-3 py-1 rounded {vol_bg}'
+                            ).style(f'color: {vol_color};'),
+                        )
                         
                         # === SEGMENTED TOGGLE (Pill Group) ===
                         def switch_lens(lens):
@@ -1405,26 +1464,21 @@ class AnalysisView:
                     eff_verdict, eff_color, eff_bg = self.calculate_efficiency_verdict(self.df)
                     
                     with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8 h-full flex flex-col justify-between').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
-                        # Header with verdict badge
-                        with ui.row().classes('w-full items-center gap-3 mb-1'):
-                            ui.label('Aerobic Efficiency').classes('text-xl font-bold text-white')
-                            self.efficiency_verdict_label = ui.label(f'{eff_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {eff_bg}').style(f'color: {eff_color}; cursor: pointer;')
-                            self.efficiency_verdict_label.on(
-                                'click',
-                                lambda: self.show_aerobic_efficiency_info(
-                                    highlight_verdict=self.efficiency_verdict_label.text if hasattr(self, 'efficiency_verdict_label') else None,
-                                    from_trends=True
-                                )
-                            )
-                            ae_info_icon = ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-lg transition-colors')
-                            ae_info_icon.on(
-                                'click',
-                                lambda: self.show_aerobic_efficiency_info(
-                                    highlight_verdict=self.efficiency_verdict_label.text if hasattr(self, 'efficiency_verdict_label') else None,
-                                    from_trends=True
-                                )
-                            )
-                        ui.label('Running efficiency vs. cardiovascular drift over time').classes('text-sm text-zinc-400 mb-4')
+                        _, _, self.efficiency_verdict_label = self._render_chart_header(
+                            title='Aerobic Efficiency',
+                            subtitle='Running efficiency vs. cardiovascular drift over time',
+                            on_info_click=lambda: self.show_aerobic_efficiency_info(
+                                highlight_verdict=(
+                                    self.efficiency_verdict_label.text
+                                    if hasattr(self, 'efficiency_verdict_label')
+                                    else None
+                                ),
+                                from_trends=True,
+                            ),
+                            verdict_widget=lambda: ui.label(f'{eff_verdict}').classes(
+                                f'text-sm font-bold px-3 py-1 rounded {eff_bg}'
+                            ).style(f'color: {eff_color};'),
+                        )
                         
                         # Calculate consistency text for EF
                         consistency_text = 'High' if r_squared > 0.7 else 'Moderate' if r_squared > 0.4 else 'Volatile'
@@ -1485,24 +1539,20 @@ class AnalysisView:
                     cad_verdict, cad_color, cad_bg = self.calculate_cadence_verdict(self.df)
                     
                     with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8 h-full flex flex-col justify-between').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
-                        # Header with verdict badge
-                        with ui.row().classes('w-full items-center gap-3 mb-1'):
-                            ui.label('Running Mechanics').classes('text-xl font-bold text-white')
-                            self.cadence_verdict_label = ui.label(f'{cad_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {cad_bg}').style(f'color: {cad_color}; cursor: pointer;')
-                            self.cadence_verdict_label.on(
-                                'click',
-                                lambda: self.show_form_info(
-                                    highlight_verdict=self.cadence_verdict_label.text if hasattr(self, 'cadence_verdict_label') else None
+                        _, _, self.cadence_verdict_label = self._render_chart_header(
+                            title='Running Mechanics',
+                            subtitle='Cadence trend showing turnover consistency',
+                            on_info_click=lambda: self.show_form_info(
+                                highlight_verdict=(
+                                    self.cadence_verdict_label.text
+                                    if hasattr(self, 'cadence_verdict_label')
+                                    else None
                                 )
-                            )
-                            form_info_icon = ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-lg transition-colors')
-                            form_info_icon.on(
-                                'click',
-                                lambda: self.show_form_info(
-                                    highlight_verdict=self.cadence_verdict_label.text if hasattr(self, 'cadence_verdict_label') else None
-                                )
-                            )
-                        ui.label('Cadence trend showing turnover consistency').classes('text-sm text-zinc-400 mb-4')
+                            ),
+                            verdict_widget=lambda: ui.label(f'{cad_verdict}').classes(
+                                f'text-sm font-bold px-3 py-1 rounded {cad_bg}'
+                            ).style(f'color: {cad_color};'),
+                        )
                         
                         # Chart with zoom binding
                         self.cadence_chart = ui.plotly(cadence_fig).classes('w-full')
@@ -1594,8 +1644,7 @@ class AnalysisView:
             eff_verdict, eff_color, eff_bg = self.calculate_efficiency_verdict(df_for_verdict)
             self.efficiency_verdict_label.set_text(eff_verdict)
             self.efficiency_verdict_label.classes(remove='bg-emerald-500/20 bg-orange-500/20 bg-red-500/20 bg-blue-500/20 bg-zinc-700', add=eff_bg)
-            self.efficiency_verdict_label.style(f'color: {eff_color}; cursor: pointer;')
-            self.efficiency_verdict_label.on('click', lambda: self.show_aerobic_efficiency_info(highlight_verdict=eff_verdict, from_trends=True), replace=True)
+            self.efficiency_verdict_label.style(f'color: {eff_color};')
                 
         except Exception as ex:
             # Silently catch errors
@@ -1677,8 +1726,7 @@ class AnalysisView:
             # Update verdict label
             self.cadence_verdict_label.set_text(f'{cad_verdict}')
             self.cadence_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {cad_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-yellow-500/20 bg-orange-500/20 bg-red-500/20 bg-zinc-700')
-            self.cadence_verdict_label.style(f'color: {cad_color}; cursor: pointer;')
-            self.cadence_verdict_label.on('click', lambda: self.show_form_info(highlight_verdict=cad_verdict), replace=True)
+            self.cadence_verdict_label.style(f'color: {cad_color};')
                 
         except Exception as ex:
             # Silently catch errors

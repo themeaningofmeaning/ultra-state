@@ -1,0 +1,42 @@
+- main [ref=e5]:
+  - generic [ref=e7]:
+    - generic [ref=e8]:
+      - generic [ref=e9]: 🏃‍♂️ Ultra State
+      - generic [ref=e10]: TIMEFRAME
+      - generic [ref=e13] [cursor=pointer]:
+        - generic [ref=e15]:
+          - generic [ref=e16]: Last 30 Days
+          - combobox "Last 30 Days" [ref=e17]
+        - generic [ref=e19]: arrow_drop_down
+      - generic [ref=e20]: ACTIONS
+      - generic [ref=e21]:
+        - button "EXPORT CSV" [disabled] [ref=e22]:
+          - generic [ref=e23]:
+            - img [ref=e24]: download
+            - generic [ref=e25]: EXPORT CSV
+        - button "COPY FOR AI":
+          - generic: auto_awesome
+          - generic: COPY FOR AI
+      - separator [ref=e26]
+      - separator [ref=e27]
+      - button "Library ● Not configured" [ref=e28] [cursor=pointer]:
+        - generic [ref=e30]:
+          - generic [ref=e31]: folder
+          - generic [ref=e32]: Library
+          - generic [ref=e33]:
+            - generic [ref=e34]: ●
+            - generic [ref=e35]: Not configured
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - tablist [ref=e39]:
+          - generic [ref=e40]:
+            - tab "Trends" [selected] [ref=e41] [cursor=pointer]:
+              - generic [ref=e43]: Trends
+            - tab "FEED" [ref=e45] [cursor=pointer]:
+              - generic [ref=e47]: FEED
+            - tab "ACTIVITIES" [ref=e49] [cursor=pointer]:
+              - generic [ref=e51]: ACTIVITIES
+        - button [ref=e53] [cursor=pointer]:
+          - img [ref=e55]: download
+      - tabpanel [ref=e57]:
+        - tabpanel [ref=e58]

@@ -1,0 +1,460 @@
+- generic [active] [ref=e1]:
+  - main [ref=e5]:
+    - generic [ref=e7]:
+      - generic [ref=e8]:
+        - generic [ref=e9]: 🏃‍♂️ Ultra State
+        - generic [ref=e10]: TIMEFRAME
+        - generic [ref=e13] [cursor=pointer]:
+          - generic [ref=e15]:
+            - generic [ref=e16]: Last 30 Days
+            - combobox "Last 30 Days" [ref=e17]
+          - generic [ref=e19]: arrow_drop_down
+        - generic [ref=e20]: ACTIONS
+        - generic [ref=e21]:
+          - button "EXPORT CSV" [ref=e22] [cursor=pointer]:
+            - generic [ref=e23]:
+              - img [ref=e24]: download
+              - generic [ref=e25]: EXPORT CSV
+          - button "COPY FOR AI" [ref=e84] [cursor=pointer]:
+            - generic [ref=e85]: auto_awesome
+            - generic [ref=e86]: COPY FOR AI
+        - separator [ref=e26]
+        - separator [ref=e27]
+        - button "Library ● Synced" [ref=e87] [cursor=pointer]:
+          - generic [ref=e30]:
+            - generic [ref=e31]: folder
+            - generic [ref=e32]: Library
+            - generic [ref=e33]:
+              - generic [ref=e34]: ●
+              - generic [ref=e35]: Synced
+      - generic [ref=e37]:
+        - generic [ref=e38]:
+          - tablist [ref=e39]:
+            - generic [ref=e40]:
+              - tab "Trends" [ref=e41] [cursor=pointer]:
+                - generic [ref=e43]: Trends
+              - tab "FEED" [ref=e45] [cursor=pointer]:
+                - generic [ref=e47]: FEED
+              - tab "ACTIVITIES" [selected] [ref=e49] [cursor=pointer]:
+                - generic [ref=e51]: ACTIVITIES
+          - button:
+            - generic:
+              - img: download
+        - tabpanel [ref=e220]:
+          - tabpanel [ref=e221]:
+            - generic [ref=e222]:
+              - generic [ref=e1087]:
+                - generic [ref=e1089]:
+                  - button "All" [ref=e1090] [cursor=pointer]:
+                    - generic [ref=e1092]: All
+                  - button "Short" [ref=e1093] [cursor=pointer]:
+                    - generic [ref=e1095]: Short
+                  - button "Medium" [ref=e1096] [cursor=pointer]:
+                    - generic [ref=e1098]: Medium
+                  - button "Long" [ref=e1099] [cursor=pointer]:
+                    - generic [ref=e1101]: Long
+                - generic [ref=e1102]:
+                  - button "🏔️ Hilly" [ref=e1103] [cursor=pointer]:
+                    - generic [ref=e1105]: 🏔️ Hilly
+                  - button "⚡ Intervals" [ref=e1106] [cursor=pointer]:
+                    - generic [ref=e1108]: ⚡ Intervals
+                  - button "🏃 Long Run" [ref=e1109] [cursor=pointer]:
+                    - generic [ref=e1111]: 🏃 Long Run
+                  - button "⚓ Steady" [ref=e1112] [cursor=pointer]:
+                    - generic [ref=e1114]: ⚓ Steady
+                  - button "🔥 Tempo" [ref=e1115] [cursor=pointer]:
+                    - generic [ref=e1117]: 🔥 Tempo
+                  - button "📈 THRESHOLD" [ref=e1118] [cursor=pointer]:
+                    - generic [ref=e1120]: 📈 THRESHOLD
+                  - button "🔋 ANAEROBIC" [ref=e1121] [cursor=pointer]:
+                    - generic [ref=e1123]: 🔋 ANAEROBIC
+                  - button "🫀 VO2 MAX" [ref=e1124] [cursor=pointer]:
+                    - generic [ref=e1126]: 🫀 VO2 MAX
+              - generic [ref=e1128]:
+                - table [ref=e1130]:
+                  - rowgroup [ref=e1131]:
+                    - row "Date Dist Pace Elev Run Context" [ref=e1132]:
+                      - columnheader [ref=e1133]:
+                        - checkbox [ref=e1134] [cursor=pointer]:
+                          - img [ref=e1137]
+                      - columnheader "Date" [ref=e1139] [cursor=pointer]:
+                        - text: Date
+                        - generic [ref=e1140]: arrow_upward
+                      - columnheader "Dist" [ref=e1141] [cursor=pointer]:
+                        - text: Dist
+                        - generic [ref=e1142]: arrow_upward
+                      - columnheader "Pace" [ref=e1143] [cursor=pointer]:
+                        - text: Pace
+                        - generic [ref=e1144]: arrow_upward
+                      - columnheader "Elev" [ref=e1145] [cursor=pointer]:
+                        - text: Elev
+                        - generic [ref=e1146]: arrow_upward
+                      - columnheader "Run Context" [ref=e1147] [cursor=pointer]:
+                        - text: Run Context
+                        - generic [ref=e1148]: arrow_upward
+                      - columnheader [ref=e1149]
+                  - rowgroup [ref=e1150]:
+                    - row "Sat, 02/21 10:48AM 3.2 mi 9:47 /mi ⛰️ 173 ft 🔥 Tempo ⚡ Intervals" [ref=e1151]:
+                      - cell [ref=e1152]:
+                        - checkbox [ref=e1153] [cursor=pointer]:
+                          - img [ref=e1156]
+                      - cell "Sat, 02/21 10:48AM" [ref=e1158]:
+                        - generic [ref=e1159]:
+                          - generic [ref=e1160]: Sat, 02/21
+                          - generic [ref=e1161]: 10:48AM
+                      - cell "3.2 mi" [ref=e1162]:
+                        - generic [ref=e1163]:
+                          - generic [ref=e1164]: "3.2"
+                          - generic [ref=e1165]: mi
+                      - cell "9:47 /mi" [ref=e1166]:
+                        - generic [ref=e1167]:
+                          - generic [ref=e1168]: 9:47
+                          - generic [ref=e1169]: /mi
+                      - cell "⛰️ 173 ft" [ref=e1170]:
+                        - generic [ref=e1171]:
+                          - generic [ref=e1172]: ⛰️
+                          - generic [ref=e1173]: "173"
+                          - generic [ref=e1174]: ft
+                      - cell "🔥 Tempo ⚡ Intervals" [ref=e1175]:
+                        - generic [ref=e1176]:
+                          - generic [ref=e1177]: 🔥 Tempo
+                          - generic [ref=e1178]: ⚡ Intervals
+                      - cell [ref=e1179]:
+                        - generic [ref=e1180]:
+                          - button [ref=e1181] [cursor=pointer]:
+                            - img [ref=e1183]: visibility
+                          - button [ref=e1184] [cursor=pointer]:
+                            - img [ref=e1186]: download
+                          - button [ref=e1187] [cursor=pointer]:
+                            - img [ref=e1189]: delete
+                    - row "Wed, 02/18 6:05PM 3.6 mi 9:22 /mi ⛰️ 62 ft 🔥 Tempo" [ref=e1190]:
+                      - cell [ref=e1191]:
+                        - checkbox [ref=e1192] [cursor=pointer]:
+                          - img [ref=e1195]
+                      - cell "Wed, 02/18 6:05PM" [ref=e1197]:
+                        - generic [ref=e1198]:
+                          - generic [ref=e1199]: Wed, 02/18
+                          - generic [ref=e1200]: 6:05PM
+                      - cell "3.6 mi" [ref=e1201]:
+                        - generic [ref=e1202]:
+                          - generic [ref=e1203]: "3.6"
+                          - generic [ref=e1204]: mi
+                      - cell "9:22 /mi" [ref=e1205]:
+                        - generic [ref=e1206]:
+                          - generic [ref=e1207]: 9:22
+                          - generic [ref=e1208]: /mi
+                      - cell "⛰️ 62 ft" [ref=e1209]:
+                        - generic [ref=e1210]:
+                          - generic [ref=e1211]: ⛰️
+                          - generic [ref=e1212]: "62"
+                          - generic [ref=e1213]: ft
+                      - cell "🔥 Tempo" [ref=e1214]:
+                        - generic [ref=e1216]: 🔥 Tempo
+                      - cell [ref=e1217]:
+                        - generic [ref=e1218]:
+                          - button [ref=e1219] [cursor=pointer]:
+                            - img [ref=e1221]: visibility
+                          - button [ref=e1222] [cursor=pointer]:
+                            - img [ref=e1224]: download
+                          - button [ref=e1225] [cursor=pointer]:
+                            - img [ref=e1227]: delete
+                    - row "Tue, 02/17 7:57PM 3.2 mi 8:14 /mi ⛰️ 144 ft 🔥 Tempo ⚡ Intervals" [ref=e1228]:
+                      - cell [ref=e1229]:
+                        - checkbox [ref=e1230] [cursor=pointer]:
+                          - img [ref=e1233]
+                      - cell "Tue, 02/17 7:57PM" [ref=e1235]:
+                        - generic [ref=e1236]:
+                          - generic [ref=e1237]: Tue, 02/17
+                          - generic [ref=e1238]: 7:57PM
+                      - cell "3.2 mi" [ref=e1239]:
+                        - generic [ref=e1240]:
+                          - generic [ref=e1241]: "3.2"
+                          - generic [ref=e1242]: mi
+                      - cell "8:14 /mi" [ref=e1243]:
+                        - generic [ref=e1244]:
+                          - generic [ref=e1245]: 8:14
+                          - generic [ref=e1246]: /mi
+                      - cell "⛰️ 144 ft" [ref=e1247]:
+                        - generic [ref=e1248]:
+                          - generic [ref=e1249]: ⛰️
+                          - generic [ref=e1250]: "144"
+                          - generic [ref=e1251]: ft
+                      - cell "🔥 Tempo ⚡ Intervals" [ref=e1252]:
+                        - generic [ref=e1253]:
+                          - generic [ref=e1254]: 🔥 Tempo
+                          - generic [ref=e1255]: ⚡ Intervals
+                      - cell [ref=e1256]:
+                        - generic [ref=e1257]:
+                          - button [ref=e1258] [cursor=pointer]:
+                            - img [ref=e1260]: visibility
+                          - button [ref=e1261] [cursor=pointer]:
+                            - img [ref=e1263]: download
+                          - button [ref=e1264] [cursor=pointer]:
+                            - img [ref=e1266]: delete
+                    - row "Sat, 02/14 12:43PM 0.4 mi 8:26 /mi ⛰️ 16 ft 🔥 Tempo" [ref=e1267]:
+                      - cell [ref=e1268]:
+                        - checkbox [ref=e1269] [cursor=pointer]:
+                          - img [ref=e1272]
+                      - cell "Sat, 02/14 12:43PM" [ref=e1274]:
+                        - generic [ref=e1275]:
+                          - generic [ref=e1276]: Sat, 02/14
+                          - generic [ref=e1277]: 12:43PM
+                      - cell "0.4 mi" [ref=e1278]:
+                        - generic [ref=e1279]:
+                          - generic [ref=e1280]: "0.4"
+                          - generic [ref=e1281]: mi
+                      - cell "8:26 /mi" [ref=e1282]:
+                        - generic [ref=e1283]:
+                          - generic [ref=e1284]: 8:26
+                          - generic [ref=e1285]: /mi
+                      - cell "⛰️ 16 ft" [ref=e1286]:
+                        - generic [ref=e1287]:
+                          - generic [ref=e1288]: ⛰️
+                          - generic [ref=e1289]: "16"
+                          - generic [ref=e1290]: ft
+                      - cell "🔥 Tempo" [ref=e1291]:
+                        - generic [ref=e1293]: 🔥 Tempo
+                      - cell [ref=e1294]:
+                        - generic [ref=e1295]:
+                          - button [ref=e1296] [cursor=pointer]:
+                            - img [ref=e1298]: visibility
+                          - button [ref=e1299] [cursor=pointer]:
+                            - img [ref=e1301]: download
+                          - button [ref=e1302] [cursor=pointer]:
+                            - img [ref=e1304]: delete
+                    - row "Sat, 02/14 12:00PM 4.5 mi 7:00 /mi ⛰️ 98 ft 🔥 Tempo 📈 THRESHOLD" [ref=e1305]:
+                      - cell [ref=e1306]:
+                        - checkbox [ref=e1307] [cursor=pointer]:
+                          - img [ref=e1310]
+                      - cell "Sat, 02/14 12:00PM" [ref=e1312]:
+                        - generic [ref=e1313]:
+                          - generic [ref=e1314]: Sat, 02/14
+                          - generic [ref=e1315]: 12:00PM
+                      - cell "4.5 mi" [ref=e1316]:
+                        - generic [ref=e1317]:
+                          - generic [ref=e1318]: "4.5"
+                          - generic [ref=e1319]: mi
+                      - cell "7:00 /mi" [ref=e1320]:
+                        - generic [ref=e1321]:
+                          - generic [ref=e1322]: 7:00
+                          - generic [ref=e1323]: /mi
+                      - cell "⛰️ 98 ft" [ref=e1324]:
+                        - generic [ref=e1325]:
+                          - generic [ref=e1326]: ⛰️
+                          - generic [ref=e1327]: "98"
+                          - generic [ref=e1328]: ft
+                      - cell "🔥 Tempo 📈 THRESHOLD" [ref=e1329]:
+                        - generic [ref=e1330]:
+                          - generic [ref=e1331]: 🔥 Tempo
+                          - generic [ref=e1332]: 📈 THRESHOLD
+                      - cell [ref=e1333]:
+                        - generic [ref=e1334]:
+                          - button [ref=e1335] [cursor=pointer]:
+                            - img [ref=e1337]: visibility
+                          - button [ref=e1338] [cursor=pointer]:
+                            - img [ref=e1340]: download
+                          - button [ref=e1341] [cursor=pointer]:
+                            - img [ref=e1343]: delete
+                    - row "Wed, 02/11 6:12PM 1.1 mi 6:27 /mi ⛰️ 16 ft 🔥 Tempo" [ref=e1344]:
+                      - cell [ref=e1345]:
+                        - checkbox [ref=e1346] [cursor=pointer]:
+                          - img [ref=e1349]
+                      - cell "Wed, 02/11 6:12PM" [ref=e1351]:
+                        - generic [ref=e1352]:
+                          - generic [ref=e1353]: Wed, 02/11
+                          - generic [ref=e1354]: 6:12PM
+                      - cell "1.1 mi" [ref=e1355]:
+                        - generic [ref=e1356]:
+                          - generic [ref=e1357]: "1.1"
+                          - generic [ref=e1358]: mi
+                      - cell "6:27 /mi" [ref=e1359]:
+                        - generic [ref=e1360]:
+                          - generic [ref=e1361]: 6:27
+                          - generic [ref=e1362]: /mi
+                      - cell "⛰️ 16 ft" [ref=e1363]:
+                        - generic [ref=e1364]:
+                          - generic [ref=e1365]: ⛰️
+                          - generic [ref=e1366]: "16"
+                          - generic [ref=e1367]: ft
+                      - cell "🔥 Tempo" [ref=e1368]:
+                        - generic [ref=e1370]: 🔥 Tempo
+                      - cell [ref=e1371]:
+                        - generic [ref=e1372]:
+                          - button [ref=e1373] [cursor=pointer]:
+                            - img [ref=e1375]: visibility
+                          - button [ref=e1376] [cursor=pointer]:
+                            - img [ref=e1378]: download
+                          - button [ref=e1379] [cursor=pointer]:
+                            - img [ref=e1381]: delete
+                    - row "Tue, 02/10 8:06PM 4.1 mi 9:56 /mi ⛰️ 187 ft 🔷 Steady ⚡ Intervals 🔋 ANAEROBIC" [ref=e1382]:
+                      - cell [ref=e1383]:
+                        - checkbox [ref=e1384] [cursor=pointer]:
+                          - img [ref=e1387]
+                      - cell "Tue, 02/10 8:06PM" [ref=e1389]:
+                        - generic [ref=e1390]:
+                          - generic [ref=e1391]: Tue, 02/10
+                          - generic [ref=e1392]: 8:06PM
+                      - cell "4.1 mi" [ref=e1393]:
+                        - generic [ref=e1394]:
+                          - generic [ref=e1395]: "4.1"
+                          - generic [ref=e1396]: mi
+                      - cell "9:56 /mi" [ref=e1397]:
+                        - generic [ref=e1398]:
+                          - generic [ref=e1399]: 9:56
+                          - generic [ref=e1400]: /mi
+                      - cell "⛰️ 187 ft" [ref=e1401]:
+                        - generic [ref=e1402]:
+                          - generic [ref=e1403]: ⛰️
+                          - generic [ref=e1404]: "187"
+                          - generic [ref=e1405]: ft
+                      - cell "🔷 Steady ⚡ Intervals 🔋 ANAEROBIC" [ref=e1406]:
+                        - generic [ref=e1407]:
+                          - generic [ref=e1408]: 🔷 Steady
+                          - generic [ref=e1409]: ⚡ Intervals
+                          - generic [ref=e1410]: 🔋 ANAEROBIC
+                      - cell [ref=e1411]:
+                        - generic [ref=e1412]:
+                          - button [ref=e1413] [cursor=pointer]:
+                            - img [ref=e1415]: visibility
+                          - button [ref=e1416] [cursor=pointer]:
+                            - img [ref=e1418]: download
+                          - button [ref=e1419] [cursor=pointer]:
+                            - img [ref=e1421]: delete
+                    - row "Thu, 02/05 4:28PM 1.8 mi 7:18 /mi ⛰️ 32 ft 🔥 Tempo" [ref=e1422]:
+                      - cell [ref=e1423]:
+                        - checkbox [ref=e1424] [cursor=pointer]:
+                          - img [ref=e1427]
+                      - cell "Thu, 02/05 4:28PM" [ref=e1429]:
+                        - generic [ref=e1430]:
+                          - generic [ref=e1431]: Thu, 02/05
+                          - generic [ref=e1432]: 4:28PM
+                      - cell "1.8 mi" [ref=e1433]:
+                        - generic [ref=e1434]:
+                          - generic [ref=e1435]: "1.8"
+                          - generic [ref=e1436]: mi
+                      - cell "7:18 /mi" [ref=e1437]:
+                        - generic [ref=e1438]:
+                          - generic [ref=e1439]: 7:18
+                          - generic [ref=e1440]: /mi
+                      - cell "⛰️ 32 ft" [ref=e1441]:
+                        - generic [ref=e1442]:
+                          - generic [ref=e1443]: ⛰️
+                          - generic [ref=e1444]: "32"
+                          - generic [ref=e1445]: ft
+                      - cell "🔥 Tempo" [ref=e1446]:
+                        - generic [ref=e1448]: 🔥 Tempo
+                      - cell [ref=e1449]:
+                        - generic [ref=e1450]:
+                          - button [ref=e1451] [cursor=pointer]:
+                            - img [ref=e1453]: visibility
+                          - button [ref=e1454] [cursor=pointer]:
+                            - img [ref=e1456]: download
+                          - button [ref=e1457] [cursor=pointer]:
+                            - img [ref=e1459]: delete
+                    - row "Wed, 02/04 12:59PM 3.7 mi 9:26 /mi ⛰️ 403 ft 🔥 Tempo ⛰️ Hilly ⚡ Intervals 🔋 ANAEROBIC" [ref=e1460]:
+                      - cell [ref=e1461]:
+                        - checkbox [ref=e1462] [cursor=pointer]:
+                          - img [ref=e1465]
+                      - cell "Wed, 02/04 12:59PM" [ref=e1467]:
+                        - generic [ref=e1468]:
+                          - generic [ref=e1469]: Wed, 02/04
+                          - generic [ref=e1470]: 12:59PM
+                      - cell "3.7 mi" [ref=e1471]:
+                        - generic [ref=e1472]:
+                          - generic [ref=e1473]: "3.7"
+                          - generic [ref=e1474]: mi
+                      - cell "9:26 /mi" [ref=e1475]:
+                        - generic [ref=e1476]:
+                          - generic [ref=e1477]: 9:26
+                          - generic [ref=e1478]: /mi
+                      - cell "⛰️ 403 ft" [ref=e1479]:
+                        - generic [ref=e1480]:
+                          - generic [ref=e1481]: ⛰️
+                          - generic [ref=e1482]: "403"
+                          - generic [ref=e1483]: ft
+                      - cell "🔥 Tempo ⛰️ Hilly ⚡ Intervals 🔋 ANAEROBIC" [ref=e1484]:
+                        - generic [ref=e1485]:
+                          - generic [ref=e1486]: 🔥 Tempo
+                          - generic [ref=e1487]: ⛰️ Hilly
+                          - generic [ref=e1488]: ⚡ Intervals
+                          - generic [ref=e1489]: 🔋 ANAEROBIC
+                      - cell [ref=e1490]:
+                        - generic [ref=e1491]:
+                          - button [ref=e1492] [cursor=pointer]:
+                            - img [ref=e1494]: visibility
+                          - button [ref=e1495] [cursor=pointer]:
+                            - img [ref=e1497]: download
+                          - button [ref=e1498] [cursor=pointer]:
+                            - img [ref=e1500]: delete
+                    - row "Wed, 01/28 6:07PM 2.6 mi 8:04 /mi ⛰️ 65 ft 🔥 Tempo" [ref=e1501]:
+                      - cell [ref=e1502]:
+                        - checkbox [ref=e1503] [cursor=pointer]:
+                          - img [ref=e1506]
+                      - cell "Wed, 01/28 6:07PM" [ref=e1508]:
+                        - generic [ref=e1509]:
+                          - generic [ref=e1510]: Wed, 01/28
+                          - generic [ref=e1511]: 6:07PM
+                      - cell "2.6 mi" [ref=e1512]:
+                        - generic [ref=e1513]:
+                          - generic [ref=e1514]: "2.6"
+                          - generic [ref=e1515]: mi
+                      - cell "8:04 /mi" [ref=e1516]:
+                        - generic [ref=e1517]:
+                          - generic [ref=e1518]: 8:04
+                          - generic [ref=e1519]: /mi
+                      - cell "⛰️ 65 ft" [ref=e1520]:
+                        - generic [ref=e1521]:
+                          - generic [ref=e1522]: ⛰️
+                          - generic [ref=e1523]: "65"
+                          - generic [ref=e1524]: ft
+                      - cell "🔥 Tempo" [ref=e1525]:
+                        - generic [ref=e1527]: 🔥 Tempo
+                      - cell [ref=e1528]:
+                        - generic [ref=e1529]:
+                          - button [ref=e1530] [cursor=pointer]:
+                            - img [ref=e1532]: visibility
+                          - button [ref=e1533] [cursor=pointer]:
+                            - img [ref=e1535]: download
+                          - button [ref=e1536] [cursor=pointer]:
+                            - img [ref=e1538]: delete
+                    - row "Wed, 01/28 1:26PM 1.5 mi 7:38 /mi ⛰️ 62 ft 🔥 Tempo" [ref=e1539]:
+                      - cell [ref=e1540]:
+                        - checkbox [ref=e1541] [cursor=pointer]:
+                          - img [ref=e1544]
+                      - cell "Wed, 01/28 1:26PM" [ref=e1546]:
+                        - generic [ref=e1547]:
+                          - generic [ref=e1548]: Wed, 01/28
+                          - generic [ref=e1549]: 1:26PM
+                      - cell "1.5 mi" [ref=e1550]:
+                        - generic [ref=e1551]:
+                          - generic [ref=e1552]: "1.5"
+                          - generic [ref=e1553]: mi
+                      - cell "7:38 /mi" [ref=e1554]:
+                        - generic [ref=e1555]:
+                          - generic [ref=e1556]: 7:38
+                          - generic [ref=e1557]: /mi
+                      - cell "⛰️ 62 ft" [ref=e1558]:
+                        - generic [ref=e1559]:
+                          - generic [ref=e1560]: ⛰️
+                          - generic [ref=e1561]: "62"
+                          - generic [ref=e1562]: ft
+                      - cell "🔥 Tempo" [ref=e1563]:
+                        - generic [ref=e1565]: 🔥 Tempo
+                      - cell [ref=e1566]:
+                        - generic [ref=e1567]:
+                          - button [ref=e1568] [cursor=pointer]:
+                            - img [ref=e1570]: visibility
+                          - button [ref=e1571] [cursor=pointer]:
+                            - img [ref=e1573]: download
+                          - button [ref=e1574] [cursor=pointer]:
+                            - img [ref=e1576]: delete
+                - generic [ref=e1577]:
+                  - generic [ref=e1578]:
+                    - generic [ref=e1579]: "Records per page:"
+                    - generic [ref=e1582] [cursor=pointer]:
+                      - generic [ref=e1584]:
+                        - generic [ref=e1585]: All
+                        - combobox "All" [ref=e1586]
+                      - generic [ref=e1588]: arrow_drop_down
+                  - generic [ref=e1590]: 1-11 of 11
+  - img [ref=e218]
