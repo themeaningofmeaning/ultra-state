@@ -153,28 +153,40 @@ class AnalysisView:
     async def handle_cadence_click(self, e):
         await self._invoke_callback_async('handle_cadence_click', e)
 
-    def _render_chart_header(self, title, subtitle, on_info_click, verdict_widget=None):
-        """Render a standardized chart header with clickable title/icon and optional verdict widget."""
+    def _render_chart_header(self, title, subtitle=None, verdict_widget=None, on_info_click=None):
+        """Render a unified chart header: [clickable title+icon] ...... [verdict]."""
         with ui.column().classes('w-full gap-1'):
-            header_row = ui.row().classes('items-center gap-2')
-            with header_row:
-                header_click_target = ui.row().classes('items-center gap-2 cursor-pointer group')
-                if callable(on_info_click):
-                    header_click_target.on('click', lambda: on_info_click())
-                with header_click_target:
-                    ui.label(title).classes('text-xl font-bold text-white')
-                    ui.icon('help_outline').classes(
-                        'text-zinc-500 group-hover:text-white text-lg transition-colors'
-                    )
+            with ui.row().classes('w-full items-center justify-between mb-4') as header_row:
+                clickable = callable(on_info_click)
+                left_classes = 'items-center gap-2 group'
+                if clickable:
+                    left_classes += ' cursor-pointer transition-colors hover:text-zinc-300'
+
+                with ui.row().classes(left_classes) as header_click_target:
+                    if clickable:
+                        header_click_target.on('click', lambda *_: on_info_click())
+
+                    title_classes = 'text-xl font-bold text-white transition-colors'
+                    if clickable:
+                        title_classes += ' group-hover:text-zinc-300'
+                    ui.label(title).classes(title_classes)
+
+                    icon_classes = 'text-lg transition-colors'
+                    if clickable:
+                        icon_classes += ' text-zinc-400 group-hover:text-zinc-300'
+                    else:
+                        icon_classes += ' text-zinc-500'
+                    ui.icon('help_outline').classes(icon_classes)
 
                 rendered_verdict = None
                 if verdict_widget is not None:
-                    if callable(verdict_widget):
-                        rendered_verdict = verdict_widget()
-                    else:
-                        rendered_verdict = verdict_widget
+                    rendered_verdict = verdict_widget() if callable(verdict_widget) else verdict_widget
+                else:
+                    ui.element('div')
 
-            subtitle_label = ui.label(subtitle).classes('text-sm text-zinc-400 mb-4')
+            subtitle_label = None
+            if subtitle:
+                subtitle_label = ui.label(subtitle).classes('text-sm text-zinc-400 mb-4')
 
         return header_row, subtitle_label, rendered_verdict
 
