@@ -132,6 +132,8 @@ runner_stats.db
 ultra_state.db
 *.html
 .build-readme.txt
+.playwright-cli/
+output/playwright/
 
 # Kiro internal specs (development only)
 .kiro/specs/
