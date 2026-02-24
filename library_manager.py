@@ -230,6 +230,10 @@ class LibraryManager:
     async def get_library_root(self) -> Optional[str]:
         return self._get_setting("library_root")
 
+    def get_library_path(self) -> Optional[str]:
+        """Compatibility alias for callers expecting a sync library path accessor."""
+        return self._get_setting("library_root")
+
     async def sync_library(self, reason: SyncReason) -> SyncReport:
         return await self._run_sync(reason=reason, override_paths=None, source_type="library")
 

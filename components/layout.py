@@ -40,6 +40,8 @@ class AppShell:
         self.copy_btn = None
         self.copy_btn_label = None
         self.copy_loading_dialog = None
+        self.copy_loading_progress = None
+        self.copy_loading_status_label = None
 
         # Main-content refs
         self.save_chart_btn = None
@@ -131,12 +133,19 @@ class AppShell:
             ui.separator().classes('my-3 bg-zinc-800')
 
             self.copy_loading_dialog = ui.dialog().props('persistent')
-            with self.copy_loading_dialog, ui.card().classes('bg-zinc-900 p-6').style(
-                'min-width: 300px; box-shadow: none;'
-            ):
-                with ui.column().classes('items-center gap-4'):
-                    ui.spinner(size='lg', color='emerald')
-                    ui.label('Exporting data to clipboard...').classes('text-lg text-white')
+            with self.copy_loading_dialog, ui.card().classes(
+                'bg-zinc-900/95 backdrop-blur-xl border border-white/10 rounded-2xl '
+                'shadow-2xl shadow-emerald-500/20 p-6 items-start'
+            ).style('min-width: 360px; box-shadow: none;'):
+                with ui.column().classes('w-full gap-4'):
+                    ui.label('Constructing Analysis...').classes('text-white font-medium tracking-wide text-lg')
+                    with ui.element('div').classes('w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden'):
+                        self.copy_loading_progress = ui.element('div').classes(
+                            'h-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-300'
+                        ).style('width: 0%')
+                    self.copy_loading_status_label = ui.label('Initializing...').classes(
+                        'font-mono text-xs text-zinc-400'
+                    )
 
             ui.element('div').classes('flex-grow')
 
