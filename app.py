@@ -49,7 +49,6 @@ from constants import (
     LOAD_MIX_VERDICT,
     SPLIT_BUCKET,
     TE_ICON_MAP,
-    TIMEFRAME_OPTIONS,
     DEFAULT_TIMEFRAME,
     MODAL_TITLES,
     UI_COPY,
@@ -58,6 +57,7 @@ from state import AppState
 from components.activity_modal import ActivityModal
 from components.library_modal import LibraryModal
 from components.analysis_view import AnalysisView
+from components.layout import AppShell
 from components.cards import (
     create_physiology_card, create_decoupling_card,
     create_running_dynamics_card, create_strategy_row, create_lap_splits_table,
@@ -155,6 +155,26 @@ class UltraStateApp:
                 'handle_cadence_click': self.handle_cadence_click,
             },
         )
+
+        # ── AppShell component (Phase 2 final step) ─────────────────────
+        self.layout = AppShell(
+            state=self.state,
+            library_modal=self.library_modal,
+            tag_config=self.TAG_CONFIG,
+            callbacks={
+                'on_timeframe_change': self.on_filter_change,
+                'on_exit_focus_mode': self.exit_focus_mode,
+                'on_export_csv': self.export_csv,
+                'on_copy_to_llm': self.copy_to_llm,
+                'on_save_chart': self.save_chart_to_downloads,
+                'on_build_trends_tab': self.analysis_view.build,
+                'on_update_activities_grid': self.update_activities_grid,
+                'on_focus_selected': self.enter_focus_mode,
+                'on_bulk_download': self.bulk_download,
+                'on_bulk_delete': self.bulk_delete,
+                'classify_run_type': self.classify_run_type,
+            },
+        )
         
         # Build UI
         self.build_ui()
@@ -247,6 +267,21 @@ class UltraStateApp:
             # ── Navigation (recursive self-reference via shim) ──────────────
             'open_modal_cb':       self.open_activity_detail_modal,
         }
+
+    def _sync_layout_refs(self):
+        """Expose AppShell-owned widgets on app attributes for compatibility."""
+        self.timeframe_select = self.layout.timeframe_select
+        self.focus_token = self.layout.focus_token
+        self.focus_token_label = self.layout.focus_token_label
+        self.export_btn = self.layout.export_btn
+        self.copy_btn = self.layout.copy_btn
+        self.copy_btn_label = self.layout.copy_btn_label
+        self.copy_loading_dialog = self.layout.copy_loading_dialog
+        self.save_chart_btn = self.layout.save_chart_btn
+        self.feed_container = self.layout.feed_container
+        self.filter_container = self.layout.filter_container
+        self.grid_container = self.layout.grid_container
+        self.fab_container = self.layout.fab_container
 
     def _set_sidebar_controls_disabled(self, disabled: bool):
         """Enable/disable top-level sidebar controls during heavy library operations."""
@@ -1177,82 +1212,9 @@ class UltraStateApp:
         ui.query('body').classes('bg-zinc-950')
         
         # 3. MAIN LAYOUT
-        with ui.row().classes('w-full h-screen m-0 p-0 gap-0 no-wrap overflow-hidden'):
-            self.build_sidebar()
-            self.build_main_content()
+        self.layout.build()
+        self._sync_layout_refs()
     
-    def build_sidebar(self):
-        """Create fixed left sidebar with controls."""
-        with ui.column().classes('w-56 bg-zinc-900 p-4 h-screen sticky top-0 flex-shrink-0'):
-            # BRAND: Desktop Logo
-            ui.label('🏃‍♂️ Ultra State').classes(
-                'text-2xl font-black tracking-tight text-white mb-8'
-            )
-            
-            # Timeframe filter
-            ui.label('TIMEFRAME').classes('text-xs text-gray-400 font-bold text-center mb-1')
-            self.timeframe_select = ui.select(
-                options=TIMEFRAME_OPTIONS,
-                value=DEFAULT_TIMEFRAME,
-                on_change=self.on_filter_change
-            ).classes('w-full mb-4 bg-zinc-900').style('color: white;').props('outlined dense dark behavior="menu"')
-            self.pre_focus_timeframe = DEFAULT_TIMEFRAME
-
-            # Focus Mode Exit Token (Hidden by default)
-            # Monochrome Apple Pro Token
-            self.focus_token = ui.button(
-                color=None,
-                on_click=self.exit_focus_mode
-            ).props('flat no-caps no-ripple').classes(
-                'w-full mb-4 rounded flex items-center justify-between px-3 py-1.5 '
-                'border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 '
-                'transition-all duration-200 hidden group'
-            )
-            with self.focus_token:
-                self.focus_token_label = ui.label('🎯 Focus (0)').classes('text-white font-bold tracking-wide')
-                ui.icon('clear').classes('text-zinc-400 group-hover:text-white transition-colors duration-200 text-lg')
-
-
-            ui.label('ACTIONS').classes('text-[10px] text-zinc-500 font-semibold tracking-[0.10em] mt-1 mb-1')
-            with ui.column().classes('w-full gap-2'):
-                # Export Button: secondary output action.
-                self.export_btn = ui.button(
-                    'EXPORT CSV',
-                    on_click=self.export_csv,
-                    icon='download',
-                ).classes('w-full bg-zinc-800 text-white hover:bg-zinc-700').props('flat disable')
-
-                # Copy for AI: primary output action.
-                # FORCE FIX: Using plain HTML button to bypass Quasar styles entirely
-                self.copy_btn = ui.element('button').classes(
-                    'ai-gradient-btn w-full text-white font-bold tracking-wide '
-                    'transform transition-transform duration-300 hover:scale-[1.01] '
-                    'flex items-center justify-center gap-2 py-2 px-4 rounded shadow-lg'
-                ).style(
-                    'cursor: pointer; opacity: 0.5; pointer-events: none;' # Start disabled
-                ).on('click.stop', self.copy_to_llm)
-                
-                with self.copy_btn:
-                    ui.icon('auto_awesome').classes('text-white')
-                    self.copy_btn_label = ui.label('COPY FOR AI').classes('text-white font-bold')
-
-            # Visual separator below output actions
-            ui.separator().classes('my-3 bg-zinc-800')
-            
-            # Create persistent loading dialog for copy operation
-            self.copy_loading_dialog = ui.dialog().props('persistent')
-            with self.copy_loading_dialog, ui.card().classes('bg-zinc-900 p-6').style('min-width: 300px; box-shadow: none;'):
-                with ui.column().classes('items-center gap-4'):
-                    ui.spinner(size='lg', color='emerald')
-                    ui.label('Exporting data to clipboard...').classes('text-lg text-white')
-
-            # Push status/footer sections to bottom of sidebar.
-            ui.element('div').classes('flex-grow')
-
-            # Minimal Library status row (settings via modal).
-            ui.separator().classes('my-3 border-zinc-800')
-            self.library_modal.render_status_row()
-            self.library_modal.build()
 
     async def start_library_services(self):
         """Start library manager loop after NiceGUI app startup."""
@@ -1325,123 +1287,11 @@ class UltraStateApp:
         self.db.delete_library_file(activity_hash)
         return trashed, trash_error, resolved_path
     
-    def build_main_content(self):
-        """Create tabbed main content area with scrolling."""
-        # Outer wrapper: No padding, flush to edges with dark background
-        with ui.column().classes('flex-1 h-screen overflow-hidden p-0 gap-0'):
-            # Inner container: Adds padding for content breathing room (no bottom padding)
-            # Increased pt-6 -> pt-10 for global vertical rhythm
-            with ui.column().classes('w-full min-h-full pt-6 px-6 pb-0 gap-4'):
-                # Create tabs row with absolute positioned Save Chart button
-                with ui.row().classes('w-full items-center mb-0 relative pb-3'):
-                    # Tabs centered, taking full width
-                # Tabs: Navigation for main content
-                    with ui.tabs(on_change=lambda e: self.toggle_save_chart_button(e.value)).classes('ember-tabs w-full justify-center').props('active-color="white" align="center" content-class="text-zinc-500"') as tabs:
-                        trends_tab = ui.tab('Trends')
-                        report_tab = ui.tab('FEED')
-                        activities_tab = ui.tab('ACTIVITIES')
-                    
-                    # Save Chart button absolutely positioned on the right (minimal, icon-focused)
-                    # Add transition for smooth fade effect
-                    self.save_chart_btn = ui.button(icon='download', on_click=self.save_chart_to_downloads, color=None).classes('text-white absolute right-0 top-0 z-10').style('background-color: #27272a; border-radius: 6px; border: none; padding: 8px; min-width: 40px; transition: opacity 0.3s ease-in-out, background-color 0.2s ease;').props('flat dense').tooltip('Save Chart')
-                
-                # Create tab panels with transparent background
-                with ui.tab_panels(tabs, value=trends_tab).classes('w-full flex-1').props('transparent'):
-                    # Trends tab panel
-                    with ui.tab_panel(trends_tab).classes('p-0'):
-                        self.analysis_view.build()
-                    
-                    # Report tab panel
-                    with ui.tab_panel(report_tab).classes('p-0'):
-                        self.build_report_tab()
-                    
-                    # Activities tab panel
-                    with ui.tab_panel(activities_tab).classes('p-0 h-full flex flex-col'):
-                        self.build_activities_tab()
-                
-        # Floating Action Bar (Lives at root level to float above everything)
-        self.fab_container = ui.row().classes(
-            'fixed bottom-8 left-1/2 transform -translate-x-1/2 ' # Centered at bottom
-            'bg-zinc-900/90 backdrop-blur-lg text-white px-6 py-2 rounded-full '
-            'shadow-2xl border border-zinc-800 border-t-white/10 z-50 items-center gap-4 '
-            'transition-all duration-300 translate-y-[150%] opacity-0 pointer-events-none'
-        )
     
     
-    def build_report_tab(self):
-        """Create report tab with Card View."""
-        # RETRY FIX: Feed Card Hover Cut-off
-        # Reverted pt-10 to standard p-4. Global container padding handles the rhythm now.
-        with ui.scroll_area().classes('w-full h-full'):
-            # Removed 'pt-10', keeping 'p-4' for internal spacing
-            self.feed_container = ui.column().classes('w-full max-w-4xl mx-auto gap-4 p-4 pb-8')
     
-    def build_activities_tab(self):
-        """Create activities tab with Filter, Table, and Floating Action Bar."""
-        # 1. Filter Bar
-        # Added 'p-4' to wrapper so it starts at same vertical height as Feed/Trends
-        # Note: We need a wrapping column to hold the padding, or apply it to the row
-        with ui.column().classes('w-full flex-1 overflow-hidden p-8 gap-2'):
-            self.filter_container = ui.row().classes('w-full mb-0 gap-2')
-            
-            # 2. Table (Moved inside this wrapper)
-            self.grid_container = ui.column().classes('w-full flex-1 overflow-hidden')
-        
-        # 3. Initial Render
-        self.update_filter_bar()
-        self.update_activities_grid()
 
-    def show_floating_action_bar(self, selected_rows):
-        """Shows the floating bar when rows are selected."""
 
-        # FIX: Explicit check for empty list
-        if not selected_rows or len(selected_rows) == 0:
-            self.hide_floating_action_bar()
-            return
-            
-        count = len(selected_rows)
-        self.fab_container.clear()
-        self.fab_container.classes(
-            remove='translate-y-[150%] opacity-0 pointer-events-none', 
-            add='translate-y-0 opacity-100 pointer-events-auto'
-        )
-        
-        with self.fab_container:
-            # COUNT BADGE — Neutral/Sleek aesthetic
-            with ui.element('div').classes(
-                'flex items-center justify-center rounded-full px-3 py-0.5 mr-1 bg-zinc-800'
-            ).style('border: 1px solid rgba(255, 255, 255, 0.1);'):
-                ui.label(f"{count}").classes('font-bold text-base text-white')
-            ui.label('Selected').classes('text-sm text-zinc-400 mr-3 font-medium')
-            
-            # FOCUS BUTTON — Crisp White Accent
-            with ui.element('button').classes(
-                'flex items-center justify-center gap-1.5 px-3 py-1 cursor-pointer rounded-md '
-                'font-bold text-sm transition-transform duration-300 hover:scale-[1.05] '
-                'text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.4)] hover:drop-shadow-[0_0_12px_rgba(255,255,255,0.8)]'
-            ).on('click.stop', lambda: self.enter_focus_mode(selected_rows)):
-                ui.icon('center_focus_strong').classes('text-lg')
-                ui.label('Focus').classes('tracking-wide')
-            
-            # SEPARATOR
-            ui.element('div').classes('w-px h-5 mx-1').style('background: rgba(255,255,255,0.1);')
-            
-            # DOWNLOAD — White icon
-            ui.button(icon='download', color=None,
-                      on_click=lambda: self.bulk_download(selected_rows)
-            ).props('flat round dense').classes('text-zinc-400 hover:text-white')
-            
-            # DELETE — Red on hover
-            ui.button(icon='delete_outline', color=None,
-                      on_click=lambda: self.bulk_delete(selected_rows)
-            ).props('flat round dense').classes('text-zinc-400 hover:text-red-400')
-
-    def hide_floating_action_bar(self):
-        """Hides the floating bar."""
-        self.fab_container.classes(
-            remove='translate-y-0 opacity-100 pointer-events-auto', 
-            add='translate-y-[150%] opacity-0 pointer-events-none'
-        )
 
     def enter_focus_mode(self, selected_rows):
         """Filters the ENTIRE APP to just these rows."""
@@ -1475,6 +1325,8 @@ class UltraStateApp:
         else:
              self.df = None
         self.analysis_view.set_data(self.df, self.activities_data)
+        self.layout.set_data(self.df, self.activities_data)
+        self.layout.update_filter_bar()
         
         # 4. Update State
         self.state.focus_mode_active = True
@@ -1496,7 +1348,7 @@ class UltraStateApp:
         self.update_activities_grid()
         
         # 7. Hide the bar
-        self.hide_floating_action_bar()
+        self.layout.hide_floating_action_bar()
         ui.notify("Focus Mode — select a timeframe to exit", type='info', icon='center_focus_strong')
 
     async def exit_focus_mode(self):
@@ -1544,7 +1396,7 @@ class UltraStateApp:
         if hasattr(self, 'activities_table') and self.activities_table:
             self.activities_table.selected.clear()
             self.activities_table.update()
-        self.hide_floating_action_bar()
+        self.layout.hide_floating_action_bar()
         if count > 0:
             ui.notify(f"Saved {count} file{'s' if count != 1 else ''} to Downloads", type='positive', icon='download')
         if errors > 0:
@@ -1581,7 +1433,7 @@ class UltraStateApp:
             if hasattr(self, 'activities_table') and self.activities_table:
                 self.activities_table.selected.clear()
             self.activities_table.update()
-            self.hide_floating_action_bar()
+            self.layout.hide_floating_action_bar()
             await self.refresh_data_view()
             if trash_failures > 0:
                 ui.notify(
@@ -1616,11 +1468,12 @@ class UltraStateApp:
         else:
             self.df = None
         self.analysis_view.set_data(self.df, self.activities_data)
+        self.layout.set_data(self.df, self.activities_data)
         
         # --- CRITICAL FIX: Update Filter Bar AFTER data load ---
         self.update_report_text() 
         self.update_activities_grid() 
-        self.update_filter_bar() # <--- ADD THIS LINE
+        self.layout.update_filter_bar()
         self.analysis_view.update_trends_chart() 
         
         # Toggle buttons and LLM safety lock
@@ -1643,16 +1496,6 @@ class UltraStateApp:
             if self._map_backfill_task is None or self._map_backfill_task.done():
                 self._map_backfill_task = asyncio.create_task(self._backfill_map_payloads_for_loaded_activities())
     
-    def toggle_save_chart_button(self, tab_name):
-        """
-        Show/hide Save Chart button based on active tab with fade effect.
-        Only show on Trends tab.
-        """
-        # Use opacity for smooth fade transition
-        if tab_name == 'Trends':
-            self.save_chart_btn.style('opacity: 1; pointer-events: auto;')
-        else:
-            self.save_chart_btn.style('opacity: 0; pointer-events: none;')
     
     # Placeholder methods for handlers (to be implemented in later tasks)
     async def on_filter_change(self, e):
@@ -2509,152 +2352,8 @@ Activity Breakdown: {activity_breakdown}
 
 
     
-    def _get_unique_tags_from_current_data(self):
-        """
-        Scans all currently loaded activities to find which tags actually exist.
-        Returns two sets: context_tags (Tempo, etc.) and physio_tags (VO2, etc.)
-        """
-        context_tags = set()
-        physio_tags = set()
-        
-        # Threshold for 'Long Run' calculation
-        if self.df is not None and len(self.df) >= 5:
-            lrt = self.df['distance_mi'].quantile(0.8)
-        else:
-            lrt = 10.0
 
-        for act in self.activities_data:
-            # 1. Get Context Tags (Tempo, Long Run, Hills, etc.)
-            # We use the EXACT same function the Feed Cards use
-            c_tags = self.classify_run_type(act, lrt) 
-            if c_tags:
-                # classify_run_type returns a string like "Long Run | Hills", split it
-                for t in c_tags.split(' | '):
-                    # Strip existing emojis so we get just "Hills" or "Tempo"
-                    clean_t = t.replace('⛰️', '').replace('🔥', '').replace('🦅', '').replace('⚡', '').replace('🏃', '').replace('🧘', '').replace('🔷', '').strip()
-                    if clean_t: context_tags.add(clean_t)
-            
-            # 2. Get Physio Tags (VO2 Max, Threshold, etc.)
-            p_tag = act.get('te_label')
-            if p_tag and str(p_tag) != "None":
-                physio_tags.add(p_tag)
-                
-        return sorted(list(context_tags)), sorted(list(physio_tags))
 
-    def update_filter_bar(self):
-        """
-        Renders the 'Apple Native' Filter Bar.
-        Layout: STACKED
-        Row 1: Distance (Scope)
-        Row 2: Tags (Context & Characteristics)
-        """
-        self.filter_container.clear()
-        
-        # 1. Get available tags
-        avail_context, avail_physio = self._get_unique_tags_from_current_data()
-        
-        # 2. Distance Definitions
-        dist_filters = [
-            {'id': 'all', 'label': 'All'},
-            {'id': 'short', 'label': 'Short'},
-            {'id': 'med', 'label': 'Medium'},
-            {'id': 'long_dist', 'label': 'Long'},
-        ]
-
-        with self.filter_container:
-            # CHANGE: Main container is now a COLUMN (Vertical Stack)
-            # gap-3 gives nice breathing room between the Distance row and Tags row
-            with ui.column().classes('w-full gap-3 mb-2'):
-                
-                # --- ROW 1: DISTANCE (The Scope) ---
-                with ui.row().classes('w-full items-center'):
-                    with ui.row().classes('bg-zinc-900 border border-zinc-800 p-1 rounded-lg gap-1'):
-                        for f in dist_filters:
-                            if f['id'] == 'all':
-                                is_active = not any(k in self.state.active_filters for k in ['short', 'med', 'long_dist'])
-                            else:
-                                is_active = f['id'] in self.state.active_filters
-                            
-                            if is_active:
-                                classes = "bg-zinc-800 text-white shadow-lg shadow-zinc-900/50 border border-zinc-700 font-bold"
-                            else:
-                                classes = "bg-transparent text-zinc-500 hover:text-zinc-300 font-medium"
-                            
-                            ui.button(f['label'], on_click=lambda id=f['id']: self.toggle_filter(id), color=None).props('flat dense no-caps ripple=False').classes(
-                                f"rounded-md px-4 py-1 text-xs transition-all duration-200 no-ripple {classes}"
-                            )
-
-                # --- ROW 2: TAGS (The Details) ---
-                # Full width container, tags wrap naturally
-                with ui.row().classes('w-full gap-2 wrap items-center'):
-                    
-                    # GROUP: CONTEXT TAGS
-                    for tag_name in avail_context:
-                        config = self.TAG_CONFIG.get(tag_name, {'icon': '🏷️', 'color': 'zinc'})
-                        color = config['color']
-                        label = tag_name if any(c in tag_name for c in ['🏃','🔥','⚡','⛰️','🧘','🔷']) else f"{config['icon']} {tag_name}"
-                        is_active = tag_name in self.state.active_filters
-                        
-                        if is_active:
-                            classes = f"filter-active bg-{color}-500 text-white shadow-md border border-{color}-600/20 transform scale-105"
-                        else:
-                            # Context Tags: "Glass Capsule" Style
-                            # Unselected: Visible container with grey border
-                            # Hover: Glows with tag's specific color
-                            classes = f"bg-zinc-800/20 text-zinc-300 border border-zinc-700 hover:bg-white/10 hover:border-{color}-500 hover:text-{color}-400 hover:shadow-[0_0_15px_-3px_currentColor] hover:-translate-y-px transition-all duration-300"
-
-                        # Use 'label' instead of 'tag_name' to show the emoji icon
-                        ui.button(label.replace('🏷️', '🏔️'), on_click=lambda t=tag_name: self.toggle_filter(t), color=None).props('flat dense no-caps ripple=False').classes(
-                            f"rounded-full px-4 py-1 text-xs font-bold transition-all duration-200 no-ripple {classes}"
-                        )
-
-                    # GROUP: PHYSIO TAGS
-                    for tag_name in avail_physio:
-                        color = 'emerald'
-                        if 'MAX' in tag_name or 'VO2' in tag_name: color = 'fuchsia'
-                        elif 'ANAEROBIC' in tag_name: color = 'orange'
-                        elif 'THRESHOLD' in tag_name: color = 'amber'
-                        
-                        is_active = tag_name in self.state.active_filters
-
-                        if is_active:
-                            classes = f"filter-active bg-{color}-500 text-white shadow-md border border-{color}-600/20"
-                        else:
-                            # Refined Dark Theme: Outlined with Colored Glow
-                            classes = f"bg-zinc-900 text-{color}-400 border border-{color}-500/50 hover:border-{color}-400 hover:shadow-[0_0_10px_currentColor] hover:-translate-y-px transition-all duration-300"
-
-                        ui.button(tag_name, on_click=lambda t=tag_name: self.toggle_filter(t), color=None).props('flat dense no-caps ripple=False').classes(
-                            f"rounded-md px-3 py-1 text-[10px] font-bold tracking-wider uppercase transition-all duration-200 no-ripple {classes}"
-                        )
-
-    def toggle_filter(self, filter_id):
-        """Toggles a filter on/off with STRICT logic."""
-        
-        dist_keys = {'short', 'med', 'long_dist'}
-        
-        # 1. Handle Distance Mutex
-        if filter_id == 'all':
-            # CLEAR all distance filters
-            self.state.active_filters -= dist_keys
-            
-        elif filter_id in dist_keys:
-            # If clicking the ACTIVE distance filter -> Do nothing (enforce one selection)
-            # OR allow toggling off to go back to "All"
-            if filter_id in self.state.active_filters:
-                self.state.active_filters.remove(filter_id) # Clicking active -> goes to 'All'
-            else:
-                self.state.active_filters -= dist_keys # Clear others
-                self.state.active_filters.add(filter_id) # Set new
-        
-        # 2. Handle Tags (Standard Toggle) - No changes here
-        else:
-            if filter_id in self.state.active_filters:
-                self.state.active_filters.remove(filter_id)
-            else:
-                self.state.active_filters.add(filter_id)
-        
-        self.update_filter_bar() 
-        self.update_activities_grid()
     
     def update_activities_grid(self):
         """
@@ -2778,7 +2477,7 @@ Activity Breakdown: {activity_breakdown}
                 def on_selection(e):
                     # Use table.selected (NiceGUI's binding) - NOT e.args (raw Quasar event)
                     # table.selected always reflects the current cumulative selection state.
-                    self.show_floating_action_bar(table.selected)
+                    self.layout.show_floating_action_bar(table.selected)
 
                 async def handle_row_action(e):
                     payload = e.args if isinstance(e.args, dict) else {}
