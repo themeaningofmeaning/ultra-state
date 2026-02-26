@@ -3,10 +3,30 @@ import json
 from datetime import datetime
 import pandas as pd
 import hashlib
+import os
+import shutil
+from pathlib import Path
+
+def get_default_db_path():
+    """Resolve a stable, writable path for the database, even in a macOS .app bundle."""
+    app_dir = Path.home() / ".ultra_state"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    target_db = app_dir / "ultra_state.db"
+    
+    # Auto-migrate local dev DB to stable app-data directory if it exists
+    local_db = Path("ultra_state.db")
+    if local_db.exists() and not target_db.exists():
+        try:
+            shutil.copy2(local_db, target_db)
+            print(f"Migrated local DB to {target_db}")
+        except Exception as e:
+            print(f"Failed to migrate local DB: {e}")
+            
+    return str(target_db)
 
 class DatabaseManager:
-    def __init__(self, db_path='ultra_state.db'):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        self.db_path = db_path if db_path else get_default_db_path()
         self.create_tables()
 
     def get_connection(self):

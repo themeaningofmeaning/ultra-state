@@ -1,5 +1,17 @@
 """
-Garmin FIT Analyzer
+Ultra State - v1.0.1
+====================
+
+CRITICAL ARCHITECTURE NOTE:
+This application follows a strict Hub-and-Spoke architecture.
+- app.py is a LIFECYCLE ROUTER only. Do not add heavy logic here.
+- Business Logic lives in `core/` (DataManager, MapPayloadBuilder, LLMExporter).
+- UI Components live in `components/`.
+- State is managed via `state.py` (Observer Pattern).
+
+BEFORE MODIFYING THIS FILE:
+Please read `ARCHITECTURE.md` for the strict rules on Dependency Injection,
+State Management, and where new features belong.
 """
 
 # Standard library imports
@@ -13,7 +25,7 @@ from datetime import datetime
 
 # Third-party imports
 import pandas as pd
-from nicegui import ui, run
+from nicegui import app, ui, run
 
 # Local imports
 from db import DatabaseManager
@@ -2274,15 +2286,29 @@ Most of your runs should be Recovery or Base, with Overload efforts 1-2x per wee
         await self.llm_exporter.generate_export(self.data_manager.activities_data)
 
 
+def close_splash_screen():
+    """Safely close the PyInstaller splash screen on Windows without crashing macOS."""
+    try:
+        import pyi_splash
+        if pyi_splash.is_alive():
+            pyi_splash.close()
+    except ImportError:
+        pass
+
 def main():
     """Application entry point."""
     # Suppress known NiceGUI framework listener-churn warning noise
     nicegui_logger = logging.getLogger('nicegui')
     nicegui_logger.addFilter(MuteFrameworkNoise())
 
-    # Instantiate the application
-    UltraStateApp()
-    
+    @ui.page('/')
+    def index():
+        # Instantiate the application explicitly on the root route
+        UltraStateApp()
+        
+        # Close splash screen only when WebView physically requests the first frame
+        ui.timer(0.1, close_splash_screen, once=True)
+
     # Run in native mode with specified window configuration
     try:
         ui.run(

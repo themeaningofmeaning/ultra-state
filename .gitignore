@@ -145,3 +145,5 @@ dist/
 
 # pytest
 .pytest_cache/
+
+RELEASE_TEMPLATE.md

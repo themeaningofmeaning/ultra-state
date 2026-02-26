@@ -1,118 +1,71 @@
 # Ultra State 🏃‍♂️💨
 
-Ultra State is a modern web-based desktop application for runners who want to unlock the advanced training metrics that Garmin Connect hides. Built with a sleek dark-mode interface, it transforms your .FIT files into actionable insights about aerobic efficiency, cardiac drift, and running form—all optimized for analysis by your LLM of choice (ChatGPT, Claude, Gemini, whatever).
+Ultra State is a web-based desktop application for runners who want to unlock the advanced training metrics that Garmin Connect hides without drowning in an endless sea of metrics and graphs that have no tangible takeaways like most paid apps. This platform analyzes your .FIT files into actionable insights about aerobic efficiency, cardiac drift, and running form—all optimized for immediate export and analysis by your LLM of choice (ChatGPT, Claude, Gemini, whatever).
 
-This project is built for serious runners who want deeper insights into efficiency and durability. It's not garbage data - if you feed this into your homerolled LLM running coach, it will help you adjust your form (cadence), avoid or heal from injuries, and maximize a weekly training plan based on your own body's ever-changing capabilities (ex. x12 hill sprints on Tue, rest Wed to lock in gains, 10 mile pace run Fri, etc.). Like our training, this tool is a work in progress so contributions, suggestions, and positive vibes will help us all.
+Ultra State is optimized to give you only data that has actionable takeaways for efficiency and durability. 
+
+No garbage data here - if you feed this into your homerolled AI running coach, Ultra State will help you adjust your form (cadence), avoid or heal from injuries, and maximize a weekly training plan based on your own body's ever-changing capabilities. Like our training, this tool is a work in progress so contributions, suggestions, and positive vibes will help us all.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 
 ## ✨ Features
 
-- 🌐 **Modern Web UI** - Sleek dark-mode interface
-- 📁➕ **Smart Import** - Drag-and-drop a folder with .fit files.  Don't worry, it won't add duplicates previously loaded.
-- 📊 **Interactive Charts** - Zoom, pan, and explore your training trends with Plotly
-- 🎯 **Performance Categorization** - Every run color-coded by quality:
-  - 🟢 **Race Ready** (Fast & Stable)
-  - 🟡 **Base Maintenance** (Slow & Stable)
-  - 🟠 **Expensive Speed** (Fast but Drifted)
-  - 🔴 **Struggling** (Slow & Drifted)
+- 📁➕ **Smart Import** - Point Ultra State to a local folder with `.fit` files (Settings → Change Folder). It continuously watches that folder and skips duplicates already in the library.
+- 🎯 **Performance Verdicts** - Every run is analyzed and categorized:
+  - **High Quality Miles** - Fast, efficient, and stable cardiac response.
+  - **Structural Miles** - Steady aerobic effort, building durability.
+  - **Broken Miles** - Struggling pace or high cardiovascular drift.
 - 🏃 **Advanced Metrics**:
   - **Training Load:** Gamified workout stress score with visual ring indicator
   - **Efficiency Factor (EF):** Your "gas mileage" (Speed ÷ Heart Rate)
   - **Aerobic Decoupling (Cost):** Measures cardiac drift and durability
   - **Heart Rate Recovery (HRR):** 1-minute post-run HR drop
   - **Running Form Analysis:** Cadence trends with form status (Elite, Good, Overstriding, etc.)
-  - **Activity Breakdown:** Moving vs. idle time analysis for trail running strategy
+  - **Activity Breakdown:** Run/Walk strategy row and terrain stats
   - Elevation gain tracking with grade-adjusted pace (GAP)
-- 📈 **Live Trend Analysis** - Zoom into any date range and see fitness trends recalculate in real-time
-- 🏃 **Activity Management** - View, filter, and delete runs with inline controls
+- � **Interactive Training Trends** - Three dedicated views (Quality, Volume, and Form) to analyze your fitness over any date range.
+- 🗺️ **Activity Information Modal** - Deep dive into any run with a keyboard-navigable interface:
+  - Interactive Leaflet map with Pace and HR Zones heatmaps
+  - Color-coded Lap Splits table with GAP
+  - Body Response section detailing EF, Cadence, and Cardiac Cost
 - 📋 **LLM-Ready Export** - One-click copy optimized for any LLM interface with comprehensive coaching context:
   - Physiology metrics (HR zones, Training Effect, Power)
   - Mechanics analysis (Cadence, Form status, Activity breakdown)
   - Lap-by-lap splits with cadence tracking
   - Weather context and terrain analysis
-- 💾 **CSV Export** - Export filtered data for Excel/Sheets analysis
-- 📸 **Chart Export** - Export all trend charts as a single combined PNG image
-- 🔄 **Cross-Platform** - Works on Windows and macOS
-- 📦 **Standalone Executables** - If you're not a developer, don't sweat it, executables are available in [releases](https://github.com/themeaningofmeaning/ultra-state/releases)
+- 💾 **CSV & Chart Export** - Export filtered data for Excel/Sheets or combined PNG images of your trends
+- 🔄 **Cross-Platform** - Works on both Windows and macOS
+- 📦 **Standalone Executables** - Non-developers can just download the [latest release](https://github.com/themeaningofmeaning/ultra-state/releases)
 
 ## 📸 Screenshots
 
-### Interactive Training Trends
-![Dashboard View](assets/graph.png)
-*Zoom-responsive charts with live trend analysis and performance categorization*
+### 1. Macro Trends & Performance Verdicts
+![Macro Trends](assets/trends.png)
+*Gain a 30,000-foot view of your training blocks. Track Efficiency vs Decoupling over time, examine your Volume Load (Recovery through Overreaching), and see every run instantly categorized with dynamic Verdict Pills based on form and cardiac response.*
 
-### Detailed Run Reports
-![Graph View](assets/dashboard.png)
-*Professional cards with HR Recovery, Efficiency Factor, and Aerobic Decoupling*
+### 2. Route & Strategy Breakdown 
+![Route Map and Strategy](assets/map_strategy.png)
+*Stop guessing where you struggled. The interactive Leaflet Pace Heatmap works in tandem with the Run/Walk Strategy analysis to show exactly how you attacked the trail, identifying every hike and surge along the route.*
 
-### 📈 How to Read the Chart
+### 3. Body Response & Mechanics
+![Body Response](assets/body_response.png)
+*Compare your Heart Rate directly against the Elevation profile to understand cardiovascular stress, backed by premium insights into your Efficiency Factor (EF), Average Cadence, Form Verdict, and overall Cardiac Cost (Decoupling).*
 
-The trend chart uses a smart 4-color system to categorize the **Quality** of every run based on two key metrics: Efficiency Factor (your speed relative to heart rate) and Aerobic Decoupling (cardiac drift):
+### 4. Deep Data Splits & GAP
+![Lap Splits](assets/splits.png)
+*Granular lap-by-lap mechanics including color-coded Grade-Adjusted Pace (GAP) and Cadence tracking, perfectly optimized for LLM analysis.*
 
-- 🟢 **Race Ready (Fast & Stable):** High EF + Low Decoupling (<5%). You were fast and your cardiovascular system stayed efficient. Peak performance.
-- 🟡 **Base Maintenance (Slow & Stable):** Low EF + Low Decoupling (<5%). A controlled easy run building aerobic base without fatigue.
-- 🟠 **Expensive Speed (Fast but Drifted):** High EF + High Decoupling (>5%). You ran fast, but your heart rate drifted significantly. Unsustainable effort.
-- 🔴 **Struggling (Slow & Drifted):** Low EF + High Decoupling (>5%). You were slow *and* your HR drifted. Sign of accumulated fatigue or poor conditions.
+## 📈 Analyzing Your Trends
 
-**Interactive Features:**
-- Click legend items to toggle traces on/off
-- Drag to zoom into specific date ranges
-- Double-click to reset zoom
-- Hover over points for detailed run stats
-- Trend subtitle updates based on visible data
+The application features three main interactive trend graphs, which recalculate dynamically as you zoom or pan to different date ranges:
 
-## 🚀 Installation
-
-### Option 1: Download the App (Easiest)
-
-Don't want to mess with Python code? No problem.
-
-1. **[Click here to go to the Releases page](https://github.com/themeaningofmeaning/ultra-state/releases).**
-2. 🍎**Mac Users:** Download `UltraState.dmg` or `UltraState-macOS.zip`.
-3. 🪟**Windows Users:** Download `UltraState-Windows.zip`, unzip it, and run the executable.
-
-### Option 2: Run from Source (For Developers)
-
-If you want to modify the code or contribute:
-
-```bash
-# Clone the repository
-git clone https://github.com/themeaningofmeaning/ultra-state.git
-cd ultra-state
-
-# Create virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate  # On macOS/Linux
-# or: venv\Scripts\activate  # On Windows
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the application
-python app.py
-```
-
-The app will open in your default browser at `http://localhost:8080`.
-
-## 🔨 Building Executables
-
-Want to create standalone executables? We've got you covered.
-
-### For macOS
-```bash
-./build_mac.sh
-# Output: dist/UltraState.app
-```
-
-### For Windows
-```cmd
-build_windows.bat
-# Output: dist\UltraState.exe
-```
-
-See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for detailed build documentation and troubleshooting.
+1. **Quality (Efficiency & Decoupling):** Tracks your Efficiency Factor (speed vs. heart rate) and Aerobic Decoupling (cardiac drift) over time. This shows if your aerobic engine is improving.
+2. **Training Volume:** Keep tabs on your overall workload through three distinct lenses:
+   - **Training Load:** Breakdown by effort (Recovery, Base, Productive, Overreaching).
+   - **HR Zones:** See the exact time-in-zone distribution.
+   - **Training Mix:** The balance between your High Quality, Structural, and Broken miles.
+3. **Form:** Monitors your average cadence and provides form verdicts, helping you pinpoint technique breakdown over a training block.
 
 ## 🔍 What the Metrics Mean
 
@@ -123,18 +76,6 @@ See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for detailed build documentat
 | **Aerobic Decoupling (Cost)** | HR drift over time | < 5% = Excellent | Measures cardiovascular durability and fatigue resistance |
 | **HR Recovery (HRR)** | HR drop in 60 seconds | > 30 bpm = Excellent | Indicates aerobic fitness and recovery capacity |
 | **Cadence** | Steps per minute | 170-180 spm optimal | Higher cadence = better form efficiency |
-
-### 💪 Understanding Training Load
-
-Training Load measures workout stress by analyzing components like duration and heart rate intensity. Higher intensity efforts are weighted exponentially, so a hard tempo run generates more load than an easy run of the same duration.
-
-**Load Categories:**
-- **🔵 Recovery (<75):** Easy effort that promotes adaptation and recovery
-- **🟢 Base (75-150):** Steady training that maintains your current fitness level
-- **🟠 Productive (150-300):** Hard work that builds fitness and improves performance
-- **🔴 Overreaching (300+):** Very high stress that requires adequate recovery time
-
-**Training Tip:** Most of your runs should be Recovery or Base, with Productive efforts 1-2x per week, and Overreaching reserved for key workouts or races.
 
 ### 💡 Understanding Aerobic Decoupling
 
@@ -161,10 +102,6 @@ The app generates reports specifically optimized for LLM analysis. Each run incl
 - **Efficiency Data**: EF, aerobic decoupling, HR recovery
 - **Form Analysis**: Cadence trends
 - **Context**: Color-coded performance category
-
-### 🔒 LLM Safety Lock
-
-The app automatically disables the "Copy for LLM" button when you select large timeframes (All Time, This Year) to prevent overwhelming your LLM with too much data. Stick to Last 30/90 Days or Last Import for best results.
 
 ### 🧠 Pro Tip: Getting the most out of your Garmin data w/ this app
 
@@ -197,22 +134,97 @@ For the most powerful insights, combine these three data sources. This allows th
 
 ```
 ultra-state/
-├── app.py            # Main application
-├── analyzer.py       # Core FIT file analysis logic
-├── assets/           # Screenshots and images
-├── build_mac.sh      # macOS build script
-├── build_windows.bat # Windows build script
-├── runner.icns       # macOS app icon
-├── runner.ico        # Windows app icon
-├── requirements.txt  # Python dependencies
-├── BUILD_INSTRUCTIONS.md  # Detailed build guide
-├── RELEASE_CHECKLIST.md   # Pre-release testing checklist
+├── app.py                  # Lifecycle router + app orchestration
+├── analyzer.py             # Analysis primitives + FIT parsing helpers
+├── constants.py            # Global enums, colors, and configuration
+├── db.py                   # SQLite database manager for activity metadata
+├── hr_zones.py             # Heart rate zone calculation utilities
+├── library_manager.py      # Local directory watching and FIT file ingestion
+├── state.py                # Reactive application state object
+├── updater.py              # Auto-updater checker for GitHub releases
+├── core/
+│   ├── data_manager.py     # DataFrame ownership, filtering, classification, CSV export
+│   ├── llm_export.py       # Copy-for-AI export orchestration
+│   └── map_payload.py      # Map payload generation/backfill + geometry/color migration
+├── components/
+│   ├── activity_modal.py   # Activity detail modal
+│   ├── analysis_view.py    # Trends dashboard
+│   ├── cards.py            # Reusable NiceGUI card render helpers
+│   ├── charts.py           # Reusable Plotly chart builders
+│   ├── layout.py           # App shell (sidebar/header/FAB)
+│   ├── library_modal.py    # Library settings + sync UI
+│   └── run_card.py         # Feed run card renderer
+├── assets/                 # Screenshots and images
+├── build_mac.sh            # macOS build script
+├── build_windows.bat       # Windows build script
+├── runner.icns             # macOS app icon
+├── runner.ico              # Windows app icon
+├── requirements.txt        # Python dependencies
+├── BUILD_INSTRUCTIONS.md   # Detailed build guide
+├── ARCHITECTURE.md         # Architectural boundaries and rules
+├── tests/                  # Analyzer/library tests
 └── README.md
 ```
 
+## 🚀 Installation
+
+### Option 1: Download the App (Easiest)
+
+Don't want to mess with Python code? No problem.
+
+1. **[Click here to go to the Releases page](https://github.com/themeaningofmeaning/ultra-state/releases).**
+2. 🍎**Mac Users:** Download `UltraState.dmg` or `UltraState-macOS.zip`.
+3. 🪟**Windows Users:** Download `UltraState-Windows.zip`, unzip it, and run the executable.
+
+### Option 2: Run from Source (For Developers)
+
+If you want to modify the code or contribute:
+
+```bash
+# Clone the repository
+git clone https://github.com/themeaningofmeaning/ultra-state.git
+cd ultra-state
+
+# Create virtual environment (recommended)
+python -m venv venv
+source venv/bin/activate  # On macOS/Linux
+# or: venv\Scripts\activate  # On Windows
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the application
+python app.py
+```
+
+By default, Ultra State launches as a native desktop window (NiceGUI native mode) when you run `python app.py`.
+
+## ⚙️ Key Configuration
+
+- **Library Folder Watch:** Open **Settings** from the sidebar, click **Change Folder**, and select your local `.fit` library directory.
+- Ultra State will monitor that folder, import new runs, and avoid duplicate ingestion.
+
+## 🔨 Building Executables
+
+Want to create standalone executables? We've got you covered.
+
+### For macOS
+```bash
+./build_mac.sh
+# Output: dist/UltraState.app
+```
+
+### For Windows
+```cmd
+build_windows.bat
+# Output: dist\UltraState.exe
+```
+
+See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for detailed build documentation and troubleshooting.
+
 ## 🛠️ Built With
 
-* **[NiceGUI](https://nicegui.io/)** - Modern Python web UI framework with native desktop support
+* **[NiceGUI](https://nicegui.io/)** - Python web UI framework with native desktop support
 * **[Plotly](https://plotly.com/)** - Interactive, publication-quality graphs
 * **[Kaleido](https://github.com/plotly/Kaleido)** - Static image export for Plotly charts
 * **[FitParse](https://github.com/dtcooper/python-fitparse)** - Low-level FIT file parsing
@@ -232,7 +244,7 @@ Contributions are welcome! Here's how:
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
-4. Test thoroughly (see RELEASE_CHECKLIST.md)
+4. Test thoroughly (`python -m pytest tests` when available)
 5. Submit a pull request
 
 ## 🙏 Acknowledgments
@@ -246,4 +258,4 @@ Contributions are welcome! Here's how:
 Questions? Suggestions? Open an issue or reach out!
 
 ---
-*Built with ❤️ for 🏃‍♂️ and 🍵 by Dylan Goldfus*
+*Built with ❤️ for 🏃‍♂️ and ⛰️ by Dylan Goldfus*

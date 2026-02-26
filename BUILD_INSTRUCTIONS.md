@@ -35,26 +35,37 @@ NICEGUI_PATH=$(python3 -c "import nicegui; import os; print(os.path.dirname(nice
 # Clean previous builds
 rm -rf build dist
 
-# Build the app
-pyinstaller --noconfirm --onefile --windowed --clean \
+# Build the app (Note: --onedir is required for macOS to avoid compression crashes)
+pyinstaller --noconfirm --onedir --windowed --clean \
     --name "UltraState" \
     --icon="runner.icns" \
     --add-data "$NICEGUI_PATH:nicegui" \
+    --add-data "assets:assets" \
     --hidden-import="nicegui" \
     --hidden-import="analyzer" \
     --hidden-import="pandas" \
     --hidden-import="plotly" \
     --hidden-import="scipy" \
     --hidden-import="sqlite3" \
+    --hidden-import="PIL" \
+    --hidden-import="kaleido" \
+    --hidden-import="fitparse" \
+    --hidden-import="requests" \
+    --hidden-import="tzlocal" \
+    --exclude-module="matplotlib" \
     app.py
+
+# Fix macOS PyInstaller pathing for NiceGUI templates and assets
+ln -sf ../Resources/nicegui dist/UltraState.app/Contents/MacOS/nicegui
+ln -sf ../Resources/assets dist/UltraState.app/Contents/MacOS/assets
 ```
 
-### Create DMG Installer (Optional)
+### Create DMG Installer (Requires Option 1 or Option 2 with --onedir)
 ```bash
 hdiutil create dist/UltraState.dmg -volname "Ultra State" -srcfolder dist/UltraState.app -ov
 ```
 
-**Output:** `dist/UltraState` or `dist/UltraState.app`
+**Output:** `dist/UltraState.app` and `dist/UltraState.dmg`
 
 ---
 
@@ -75,20 +86,30 @@ if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
 REM Build the exe
-pyinstaller --noconfirm --onefile --windowed --clean ^
+python -m PyInstaller --noconfirm --onedir --windowed --clean ^
     --name "UltraState" ^
     --icon="runner.ico" ^
+    --splash="splash.png" ^
     --add-data "%NICEGUI_PATH%;nicegui" ^
+    --add-data "assets;assets" ^
     --hidden-import="nicegui" ^
     --hidden-import="analyzer" ^
     --hidden-import="pandas" ^
     --hidden-import="plotly" ^
     --hidden-import="scipy" ^
     --hidden-import="sqlite3" ^
+    --hidden-import="PIL" ^
+    --hidden-import="kaleido" ^
+    --hidden-import="fitparse" ^
+    --hidden-import="requests" ^
+    --hidden-import="pywebview" ^
+    --hidden-import="tzlocal" ^
+    --exclude-module="matplotlib" ^
     app.py
 ```
 
-**Output:** `dist\UltraState.exe`
+**Output:** `dist\UltraState\` directory.
+**Distribution:** Windows users expect "portable" apps to be distributed as standard `.zip` files. Right-click the `dist\UltraState` folder and select **Compress to Zip file**, naming it `UltraState-Windows.zip`. When they download and unzip it, they just run the `UltraState.exe` file inside.
 
 ---
 
@@ -106,12 +127,16 @@ pyinstaller --noconfirm --onefile --windowed --clean ^
   ```
 
 ### App crashes on startup
-- Run the executable from terminal/command prompt to see error messages
-- Check that `analyzer.py` is in the same directory as `app.py`
+- Use `--onedir` instead of `--onefile` on macOS. The massive compression required for `--onefile` bundled with the NiceGUI implicit routing causes 404 parsing errors.
+- Run the executable from terminal/command prompt to see error messages:
+  - Mac: `./dist/UltraState.app/Contents/MacOS/UltraState`
+  - Windows: `.\dist\UltraState.exe`
 
-### Large file size
-- The `--onefile` option creates a single executable but is larger
-- Use `--onedir` instead for a folder-based distribution (smaller startup time)
+### Database Errors (OperationalError)
+- Ultra State uses SQLite. To ensure the database persists between app updates and avoids permission errors in macOS root `/` environments, the database is stored at `~/.ultra_state/ultra_state.db`.
+
+### 500 Error / Native Blank Screen
+- Make sure `app.py` UI bindings are rooted inside a `@ui.page('/')` function decorator. Implied routing breaks in native mode under PyInstaller.
 
 ---
 

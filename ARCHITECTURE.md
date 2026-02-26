@@ -3,7 +3,7 @@
 Status: **v1.0.1 (Architecture Complete)**
 
 ## Core Philosophy
-Ultra State is a local-first, premium desktop analytics app for ultra-distance and trail runners. It prioritizes a fast, native-feeling dark UI and strong training signal quality over web-app conventions.
+Ultra State is a local-first, premium desktop analytics app for performance runners who care about their training data, but don't want to swim through an endless sea of metrics and graphs with no tangible takeaways.  
 
 The architecture favors clear ownership boundaries:
 - `core/` owns business/data workflows.
