@@ -180,7 +180,7 @@ python app.py
 
 By default, Ultra State launches as a native desktop window (NiceGUI native mode) when you run `python app.py`.
 
-## ⚙️ Key Configuration
+## ⚙️ .FIT Library Configuration
 
 - **Library Folder Watch:** Open **Settings** from the sidebar, click **Change Folder**, and select your local `.fit` library directory.
 - Ultra State will monitor that folder, import new runs, and avoid duplicate ingestion.
