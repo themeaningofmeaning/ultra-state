@@ -103,25 +103,6 @@ The app generates reports specifically optimized for LLM analysis. Each run incl
 - **Form Analysis**: Cadence trends
 - **Context**: Color-coded performance category
 
-### 🧠 Pro Tip: Getting the most out of your Garmin data w/ this app
-
-For the most powerful insights, combine these three data sources. This allows the AI to distinguish between a "bad day" and a "bad month."
-
-**1. The Macro Trends (Scope: All History)**
-* **File:** `Activities.csv`
-* **Source:** Garmin Connect Web $\rightarrow$ *Activities List* $\rightarrow$ Export CSV.
-* **Why:** Provides your 90-day baseline. It tells the LLM if your fitness is trending up or down over time.
-
-**2. This App's Report (Scope: This Run Only)**
-* **File:** Clipboard Text
-* **Source:** **Ultra State** $\rightarrow$ "Copy for LLM".
-* **Why:** Provides the deep-dive mechanics (Decoupling, Form Efficiency) that Garmin Connect hides.
-
-**3. The Splits (Scope: This Run Only)**
-* **File:** `activity_1234.csv`
-* **Source:** Garmin Connect Web $\rightarrow$ *Specific Activity* $\rightarrow$ Export Splits to CSV.
-* **Why:** Shows pacing strategy. It tells the LLM exactly *where* in the run you started to struggle.
-
 ### 📋 Recommended Prompt Strategy
 > "I am providing three pieces of data:
 > 1. My **Activities Overview** (past 3 months of training).
@@ -235,7 +216,16 @@ See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for detailed build documentat
 
 ## 📜 License
 
-MIT License - see LICENSE file for details.
+This software is provided under the **PolyForm Noncommercial License 1.0.0**.
+
+You are free to download, read, modify, and compile this software for your own **personal, non-commercial use**. 
+
+You may not use this software, or any modified version of it, for any commercial purpose. This includes, but is not limited to:
+- Selling copies of the software.
+- Charging for access to the software.
+- Using the software to provide a commercial service (e.g., paid coaching).
+
+For more details, see the [LICENSE](LICENSE) file.
 
 ## 🤝 Contributing
 
