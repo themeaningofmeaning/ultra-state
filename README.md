@@ -182,8 +182,8 @@ By default, Ultra State launches as a native desktop window (NiceGUI native mode
 
 ## ⚙️ .FIT Library Configuration
 
-- **Library Folder Watch:** Open **Settings** from the sidebar, click **Change Folder**, and select your local `.fit` library directory.
-- Ultra State will monitor that folder, import new runs, and avoid duplicate ingestion.
+- **Set Your Library:** Open **📁 Library** from the bottom left of the app screen, click **Change Folder**, and select your local `.fit` library directory.
+- Ultra State will monitor that folder, import new runs, and avoid duplicate imports.
 
 ## 🔨 Building Executables
 
